@@ -1,89 +1,672 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="nl">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Monteur Live Werkorder Feed</title>
-    <style>
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f4f7f6; margin: 0; padding: 20px; color: #333; }
-        .container { max-width: 800px; margin: 0 auto; }
-        header { display: flex: justify-content: space-between; align-items: center; background: #1e293b; color: white; padding: 15px 20px; border-radius: 8px; }
-        .status-badge { padding: 6px 12px; border-radius: 20px; font-weight: bold; font-size: 0.85em; }
-        .connected { background: #10b981; color: white; }
-        .disconnected { background: #ef4444; color: white; }
-        .feed { margin-top: 20px; }
-        .card { background: white; padding: 18px; border-radius: 8px; margin-bottom: 12px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); border-left: 6px solid #cbd5e1; animation: fadeIn 0.3sl ease-in-out; }
-        .card.HOOG { border-left-color: #ef4444; }
-        .card.GEMIDDELD { border-left-color: #f59e0b; }
-        .card.LAAG { border-left-color: #3b82f6; }
-        .card-header { display: flex; justify-content: space-between; font-weight: bold; margin-bottom: 8px; }
-        .time { font-size: 0.8em; color: #64748b; }
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
-    </style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Monteur werkorders</title>
+  <style>
+    :root {
+      --bg: #f4f5f7;
+      --surface: #ffffff;
+      --text: #1c2430;
+      --muted: #5d6b7c;
+      --border: #dde2e8;
+      --accent: #1d5fd1;
+      --accent-soft: #e6eefc;
+      --open: #9a4a07;
+      --open-bg: #fdf0dc;
+      --prog: #1d5fd1;
+      --prog-bg: #e6eefc;
+      --done: #17703d;
+      --done-bg: #e2f4e8;
+      --danger: #b42318;
+      --danger-bg: #fde8e6;
+      --radius: 10px;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #12171e;
+        --surface: #1b222b;
+        --text: #e8ecf1;
+        --muted: #9aa7b6;
+        --border: #2c3640;
+        --accent: #6ea3ff;
+        --accent-soft: #1f2d46;
+        --open: #f5b461;
+        --open-bg: #3a2c14;
+        --prog: #8db6ff;
+        --prog-bg: #1f2d46;
+        --done: #6fd39a;
+        --done-bg: #163325;
+        --danger: #ff8b80;
+        --danger-bg: #3b1a17;
+      }
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    }
+
+    button { font: inherit; color: inherit; }
+    :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+
+    /* ---------- Kop ---------- */
+    .kop {
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 16px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+    }
+    .kop h1 { margin: 0; font-size: 1.1rem; }
+
+    .verbinding {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 12px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      font-size: 0.85rem;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .verbinding .stip {
+      width: 10px; height: 10px; border-radius: 50%;
+      background: var(--muted);
+    }
+    .verbinding[data-toestand="verbonden"] { color: var(--done); border-color: var(--done); }
+    .verbinding[data-toestand="verbonden"] .stip { background: var(--done); }
+    .verbinding[data-toestand="verbroken"] { color: var(--danger); border-color: var(--danger); }
+    .verbinding[data-toestand="verbroken"] .stip { background: var(--danger); }
+
+    /* ---------- Indeling ---------- */
+    main {
+      display: grid;
+      grid-template-columns: minmax(280px, 380px) 1fr;
+      gap: 16px;
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 16px;
+    }
+
+    .paneel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      min-height: 200px;
+    }
+    .paneel > h2 {
+      margin: 0;
+      padding: 12px 16px;
+      font-size: 0.8rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .knop.terug { display: none; margin-bottom: 14px; }
+
+    @media (max-width: 799px) {
+      main { grid-template-columns: 1fr; padding: 12px; }
+      main[data-weergave="lijst"] #detail-paneel { display: none; }
+      main[data-weergave="detail"] #lijst-paneel { display: none; }
+      .knop.terug { display: inline-flex; }
+    }
+
+    /* ---------- Meldingen ---------- */
+    .meldingen { list-style: none; margin: 0; padding: 0; }
+    .meldingen li + li { border-top: 1px solid var(--border); }
+
+    .melding {
+      display: block;
+      width: 100%;
+      padding: 12px 16px;
+      text-align: left;
+      background: none;
+      border: 0;
+      cursor: pointer;
+    }
+    .melding:hover { background: var(--accent-soft); }
+    .melding[aria-current="true"] { background: var(--accent-soft); box-shadow: inset 4px 0 0 var(--accent); }
+
+    .melding-bovenregel {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .melding-id { font-weight: 650; }
+    .melding[data-nieuw="true"] .melding-id::before {
+      content: "";
+      display: inline-block;
+      width: 9px; height: 9px;
+      margin-right: 8px;
+      border-radius: 50%;
+      background: var(--accent);
+    }
+    .melding-tekst { margin: 2px 0; }
+    .melding-tijd { font-size: 0.8rem; color: var(--muted); }
+
+    .leeg {
+      padding: 24px 16px;
+      color: var(--muted);
+    }
+
+    /* ---------- Statusbadges ---------- */
+    .badge {
+      display: inline-block;
+      padding: 2px 10px;
+      border-radius: 999px;
+      font-size: 0.78rem;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .badge[data-status="OPEN"] { color: var(--open); background: var(--open-bg); }
+    .badge[data-status="IN_BEHANDELING"] { color: var(--prog); background: var(--prog-bg); }
+    .badge[data-status="AFGEROND"] { color: var(--done); background: var(--done-bg); }
+    .badge[data-prioriteit="HOOG"] { color: var(--danger); background: var(--danger-bg); }
+    .badge:not([data-status]):not([data-prioriteit="HOOG"]) { color: var(--muted); background: var(--bg); }
+
+    /* ---------- Detail ---------- */
+    .detail { padding: 16px; }
+    .detail-kop {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px 12px;
+      margin-bottom: 4px;
+    }
+    .detail-kop h3 { margin: 0; font-size: 1.3rem; }
+    .detail .omschrijving { margin: 4px 0 16px; font-size: 1.05rem; }
+
+    .waarschuwing {
+      margin: 0 0 16px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      color: var(--open);
+      background: var(--open-bg);
+      font-size: 0.9rem;
+    }
+
+    .velden {
+      display: grid;
+      grid-template-columns: max-content 1fr;
+      gap: 6px 16px;
+      margin: 0 0 20px;
+    }
+    .velden dt { color: var(--muted); }
+    .velden dd { margin: 0; }
+
+    .detail h4 {
+      margin: 20px 0 8px;
+      font-size: 0.8rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .taken { list-style: none; margin: 0; padding: 0; }
+    .taken li {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .taken li[data-gereed="true"] .taak-tekst { color: var(--muted); text-decoration: line-through; }
+    .taken input { width: 20px; height: 20px; }
+
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 8px 6px; text-align: left; border-bottom: 1px solid var(--border); }
+    th { color: var(--muted); font-weight: 600; font-size: 0.85rem; }
+    td.getal, th.getal { text-align: right; }
+
+    .voet {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-top: 20px;
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+
+    .knop {
+      display: inline-flex;
+      align-items: center;
+      min-height: 40px;
+      padding: 0 16px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      cursor: pointer;
+    }
+    .knop:hover { background: var(--accent-soft); }
+
+    .fout {
+      margin: 16px;
+      padding: 12px 14px;
+      border-radius: 8px;
+      color: var(--danger);
+      background: var(--danger-bg);
+    }
+    .fout p { margin: 0 0 10px; }
+
+    .laden { padding: 24px 16px; color: var(--muted); }
+
+    a { color: var(--accent); }
+
+    @media (prefers-reduced-motion: no-preference) {
+      .melding[data-vers="true"] { animation: oplichten 1.2s ease-out; }
+      @keyframes oplichten { from { background: var(--accent-soft); } }
+    }
+  </style>
 </head>
 <body>
-    <div class="container">
-        <header>
-            <h2>🉷 Monteur Werkorder Portal</h2>
-            <span id="status" class="status-badge disconnected">Verbinden...</span>
-        </header>
-
-        <h3>Live Notificaties</h3>
-        <div id="feed" class="feed">
-            <div id="empty-msg" style="color: #64748b; text-align: center; margin-top: 30px;">Wachten op binnenkomende werkosders via NGINX Gateway & Kafka...</div>
-        </div>
+  <header class="kop">
+    <h1>Mijn werkorders</h1>
+    <div id="verbinding" class="verbinding" data-toestand="verbinden" role="status" aria-live="polite">
+      <span class="stip" aria-hidden="true"></span>
+      <span id="verbinding-tekst">Verbinden…</span>
     </div>
+  </header>
 
-    <script>
-        const statusEl = document.getElementById('status');
-        const feedEl = document.getElementById('feed');
-        const wsUrl = `ws://${window.location.host}/ws`;
-        let socket;
+  <main id="hoofd" data-weergave="lijst">
+    <section id="lijst-paneel" class="paneel" aria-labelledby="lijst-kop">
+      <h2 id="lijst-kop">Meldingen</h2>
+      <div id="lijst"></div>
+    </section>
 
-        function connect() {
-            socket = new WebSocket(wsUrl);
+    <section id="detail-paneel" class="paneel" aria-labelledby="detail-kop">
+      <h2 id="detail-kop">Werkorder</h2>
+      <div id="detail"></div>
+    </section>
+  </main>
 
-            socket.onopen = () => {
-                statusEl.textContent = 'LIVE VERBONDEN';
-                statusEl.className = 'status-badge connected';
-            };
+  <script>
+    'use strict';
 
-            socket.onmessage = (event) => {
-                const msg = JSON.parse(event.data);
-                if (msg.type === 'WERKORDER_UPDATE') {
-                    renderWerkosder(msg.data, msg.timestamp);
-                }
-            };
+    // ----------------------------------------------------------------
+    // Instellingen
+    // ----------------------------------------------------------------
+    const WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
+    const API_BASIS = '/api/werkorders/';
+    const MAX_MELDINGEN = 50;
+    const API_TIMEOUT_MS = 8000;
+    const WACHT_MIN_MS = 1000;
+    const WACHT_MAX_MS = 30000;
 
-            socket.onclose = () => {
-                statusEl.textContent = 'VERBINDING VERBROKEN';
-                statusEl.className = 'status-badge disconnected';
-                setTimeout(connect, 3000);
-            };
+    const STATUS_TEKST = {
+      OPEN: 'Open',
+      IN_BEHANDELING: 'In behandeling',
+      AFGEROND: 'Afgerond'
+    };
+
+    // ----------------------------------------------------------------
+    // Toestand
+    // ----------------------------------------------------------------
+    const toestand = {
+      meldingen: [],          // nieuwste eerst
+      volgnummer: 0,
+      geselecteerd: null,     // volgnummer van de gekozen melding
+      verzoekNummer: 0,       // om verouderde antwoorden te negeren
+      detail: { fase: 'leeg' } // leeg | laden | ok | fout
+    };
+
+    // ----------------------------------------------------------------
+    // Hulpfuncties
+    // Alle data uit netwerk of API gaat via textContent, nooit via innerHTML.
+    // ----------------------------------------------------------------
+    function el(tag, props = {}, ...kinderen) {
+      const knoop = document.createElement(tag);
+      for (const [sleutel, waarde] of Object.entries(props)) {
+        if (waarde === false || waarde == null) continue;
+        if (sleutel === 'class') knoop.className = waarde;
+        else if (sleutel === 'text') knoop.textContent = waarde;
+        else if (sleutel.startsWith('on')) knoop.addEventListener(sleutel.slice(2), waarde);
+        else knoop.setAttribute(sleutel, waarde === true ? '' : waarde);
+      }
+      for (const kind of kinderen.flat()) {
+        if (kind == null || kind === false) continue;
+        knoop.append(kind.nodeType ? kind : document.createTextNode(String(kind)));
+      }
+      return knoop;
+    }
+
+    function leegMaken(knoop) {
+      while (knoop.firstChild) knoop.removeChild(knoop.firstChild);
+    }
+
+    function statusBadge(status) {
+      return el('span', { class: 'badge', 'data-status': status, text: STATUS_TEKST[status] || status });
+    }
+
+    function tijd(datum) {
+      return datum.toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    }
+
+    function datumTijd(iso) {
+      const datum = new Date(iso);
+      if (Number.isNaN(datum.getTime())) return String(iso);
+      return datum.toLocaleString('nl-NL', { dateStyle: 'medium', timeStyle: 'short' });
+    }
+
+    // ----------------------------------------------------------------
+    // Verbinding (WebSocket) met automatisch herverbinden
+    // Wachttijd verdubbelt per mislukte poging, met een willekeurige vertraging,
+    // zodat niet alle monteurs na een herstart tegelijk terugkomen.
+    // ----------------------------------------------------------------
+    let socket = null;
+    let pogingen = 0;
+    let aftelTimer = null;
+
+    function zetVerbinding(staat, tekst) {
+      document.getElementById('verbinding').dataset.toestand = staat;
+      document.getElementById('verbinding-tekst').textContent = tekst;
+    }
+
+    function verbind() {
+      clearInterval(aftelTimer);
+      zetVerbinding('verbinden', 'Verbinden…');
+
+      try {
+        socket = new WebSocket(WS_URL);
+      } catch (fout) {
+        planOpnieuw();
+        return;
+      }
+
+      socket.addEventListener('open', () => {
+        pogingen = 0;
+        zetVerbinding('verbonden', 'Verbonden');
+      });
+
+      socket.addEventListener('message', (gebeurtenis) => {
+        let bericht;
+        try {
+          bericht = JSON.parse(gebeurtenis.data);
+        } catch (fout) {
+          console.warn('Onleesbaar bericht genegeerd:', gebeurtenis.data);
+          return;
         }
+        verwerkBericht(bericht);
+      });
 
-        function renderWerkorder(data, timestamp) {
-            const emptyMsg = document.getElementById('empty-msg');
-            if (emptyMsg) {
-                emptyMsg.remove();
-            }
+      socket.addEventListener('close', planOpnieuw);
+      socket.addEventListener('error', () => { /* 'close' volgt altijd; daar handelen we het af */ });
+    }
 
-            const card = document.createElement('div');
-            card.className = `card ${data.prioriteit || 'LAAG'};
-            card.innerHTML = `
-                <div class="card-header">
-                    <span>𝓋 Werkorder #${data.werkorderId} (${data.status})</span>
-                    <span class="time">${NEW new Date(timestamp).toLocaleTimeString()}</span>
-                </div>
-                <div><strong>Locatie:</strong> ${data.locatie}</div>
-                <div><strong>Monteur:</strong> ${data.monteur}</div>
-                <div style="margin-top: 6px; color: #475569;">${data.omschriving</div>
-            `;
+    function planOpnieuw() {
+      clearInterval(aftelTimer);
+      pogingen += 1;
 
-            feedEl.prepend(card);
+      const basis = Math.min(WACHT_MAX_MS, WACHT_MIN_MS * 2 ** (pogingen - 1));
+      const wacht = Math.round(basis / 2 + Math.random() * (basis / 2));
+      let resterend = Math.ceil(wacht / 1000);
+
+      const toon = () => zetVerbinding('verbroken', `Verbroken, opnieuw proberen over ${resterend} s`);
+      toon();
+
+      aftelTimer = setInterval(() => {
+        resterend -= 1;
+        if (resterend <= 0) {
+          clearInterval(aftelTimer);
+          verbind();
+        } else {
+          toon();
         }
+      }, 1000);
+    }
 
-        connect();
-    </script>
+    // ----------------------------------------------------------------
+    // Meldingen
+    // ----------------------------------------------------------------
+    function verwerkBericht(bericht) {
+      if (!bericht || typeof bericht !== 'object') return;
+      if (bericht.type === 'SYSTEM') return; // welkomstbericht
+
+      if (typeof bericht.werkorderId !== 'string' || !bericht.werkorderId) {
+        console.warn('Melding zonder werkorderId genegeerd:', bericht);
+        return;
+      }
+
+      toestand.volgnummer += 1;
+      toestand.meldingen.unshift({
+        nr: toestand.volgnummer,
+        werkorderId: bericht.werkorderId,
+        status: typeof bericht.status === 'string' ? bericht.status : '',
+        bericht: typeof bericht.bericht === 'string' ? bericht.bericht : '',
+        ontvangen: new Date(),
+        nieuw: true,  // ongelezen, tot de monteur de melding opent
+        vers: true    // alleen voor de oplicht-animatie bij binnenkomst
+      });
+      toestand.meldingen.length = Math.min(toestand.meldingen.length, MAX_MELDINGEN);
+      tekenLijst();
+    }
+
+    function tekenLijst() {
+      const houder = document.getElementById('lijst');
+      leegMaken(houder);
+
+      if (toestand.meldingen.length === 0) {
+        houder.append(el('p', {
+          class: 'leeg',
+          text: 'Nog geen meldingen. Zodra er een werkorder wordt toegewezen of gewijzigd, verschijnt die hier.'
+        }));
+        return;
+      }
+
+      const lijst = el('ul', { class: 'meldingen' });
+      for (const melding of toestand.meldingen) {
+        const knop = el('button', {
+          type: 'button',
+          class: 'melding',
+          'data-nieuw': String(melding.nieuw),
+          'data-vers': String(melding.vers),
+          'aria-current': String(melding.nr === toestand.geselecteerd),
+          onclick: () => kies(melding.nr)
+        },
+          el('div', { class: 'melding-bovenregel' },
+            el('span', { class: 'melding-id', text: melding.werkorderId }),
+            melding.status ? statusBadge(melding.status) : null
+          ),
+          melding.bericht ? el('div', { class: 'melding-tekst', text: melding.bericht }) : null,
+          el('div', { class: 'melding-tijd', text: 'Ontvangen om ' + tijd(melding.ontvangen) })
+        );
+        lijst.append(el('li', {}, knop));
+        melding.vers = false; // animatie speelt alleen bij de eerste tekening
+      }
+      houder.append(lijst);
+    }
+
+    function kies(nr) {
+      const melding = toestand.meldingen.find((m) => m.nr === nr);
+      if (!melding) return;
+      melding.nieuw = false;
+      toestand.geselecteerd = nr;
+      document.getElementById('hoofd').dataset.weergave = 'detail';
+      tekenLijst();
+      haalWerkorderOp(melding);
+    }
+
+    // ----------------------------------------------------------------
+    // Werkorder ophalen (synchroon request/response)
+    // ----------------------------------------------------------------
+    async function haalWerkorderOp(melding) {
+      const nummer = ++toestand.verzoekNummer;
+      toestand.detail = { fase: 'laden', melding };
+      tekenDetail();
+
+      const afbreker = new AbortController();
+      const timer = setTimeout(() => afbreker.abort(), API_TIMEOUT_MS);
+
+      try {
+        const antwoord = await fetch(API_BASIS + encodeURIComponent(melding.werkorderId), {
+          headers: { Accept: 'application/json' },
+          cache: 'no-store',
+          signal: afbreker.signal
+        });
+
+        let inhoud = null;
+        try { inhoud = await antwoord.json(); } catch (fout) { /* geen JSON */ }
+
+        if (nummer !== toestand.verzoekNummer) return; // inmiddels een andere melding gekozen
+
+        if (!antwoord.ok) {
+          const uitleg = inhoud && inhoud.detail ? inhoud.detail : `Fout ${antwoord.status}`;
+          toestand.detail = { fase: 'fout', melding, tekst: uitleg, status: antwoord.status };
+        } else {
+          toestand.detail = { fase: 'ok', melding, data: inhoud, opgehaald: new Date() };
+        }
+      } catch (fout) {
+        if (nummer !== toestand.verzoekNummer) return;
+        const tekst = fout.name === 'AbortError'
+          ? 'De server antwoordt niet op tijd.'
+          : 'De werkorder kon niet worden opgehaald. Controleer je verbinding.';
+        toestand.detail = { fase: 'fout', melding, tekst };
+      } finally {
+        clearTimeout(timer);
+      }
+
+      tekenDetail();
+    }
+
+    // ----------------------------------------------------------------
+    // Detailweergave
+    // ----------------------------------------------------------------
+    function terugKnop() {
+      return el('button', {
+        type: 'button',
+        class: 'knop terug',
+        onclick: () => { document.getElementById('hoofd').dataset.weergave = 'lijst'; }
+      }, '← Terug naar meldingen');
+    }
+
+    function tekenDetail() {
+      const houder = document.getElementById('detail');
+      leegMaken(houder);
+      const { fase, melding } = toestand.detail;
+
+      if (fase === 'leeg') {
+        houder.append(el('p', { class: 'leeg', text: 'Kies een melding om de volledige werkorder te zien.' }));
+        return;
+      }
+
+      if (fase === 'laden') {
+        houder.append(el('p', { class: 'laden', role: 'status', text: `${melding.werkorderId} ophalen…` }));
+        return;
+      }
+
+      if (fase === 'fout') {
+        const status = toestand.detail.status;
+        const kop = status === 404 ? 'Werkorder niet gevonden' : 'Ophalen mislukt';
+        houder.append(el('div', { class: 'fout', role: 'alert' },
+          el('p', {}, el('strong', { text: kop }), ' – ', toestand.detail.tekst),
+          el('div', {},
+            el('button', { type: 'button', class: 'knop', onclick: () => haalWerkorderOp(melding) }, 'Opnieuw proberen'),
+            ' ',
+            terugKnop()
+          )
+        ));
+        return;
+      }
+
+      houder.append(maakWerkorder(toestand.detail.data, melding, toestand.detail.opgehaald));
+    }
+
+    function maakWerkorder(w, melding, opgehaald) {
+      const verschil = melding.status && melding.status !== w.status;
+
+      const taken = Array.isArray(w.taken) ? w.taken : [];
+      const klaar = taken.filter((t) => t.gereed).length;
+      const materiaal = Array.isArray(w.materiaal) ? w.materiaal : [];
+      const loc = w.locatie || {};
+      const co = loc.coordinaten;
+
+      return el('article', { class: 'detail' },
+        terugKnop(),
+        el('div', { class: 'detail-kop' },
+          el('h3', { text: w.werkorderId }),
+          statusBadge(w.status),
+          w.prioriteit === 'HOOG'
+            ? el('span', { class: 'badge', 'data-prioriteit': 'HOOG', text: 'Hoge prioriteit' })
+            : el('span', { class: 'badge', text: 'Prioriteit: ' + String(w.prioriteit || '').toLowerCase() })
+        ),
+        el('p', { class: 'omschrijving', text: w.omschrijving }),
+
+        verschil ? el('p', { class: 'waarschuwing', role: 'status' },
+          `De melding zei "${STATUS_TEKST[melding.status] || melding.status}", maar de actuele status is ` +
+          `"${STATUS_TEKST[w.status] || w.status}". Je ziet hier de actuele toestand.`) : null,
+
+        el('dl', { class: 'velden' },
+          el('dt', { text: 'Locatie' }),
+          el('dd', {},
+            [loc.spoorEmplacement, loc.plaats].filter(Boolean).join(', '),
+            co && Number.isFinite(co.lat) && Number.isFinite(co.lon)
+              ? [' ', el('a', {
+                  href: `https://www.openstreetmap.org/?mlat=${co.lat}&mlon=${co.lon}#map=16/${co.lat}/${co.lon}`,
+                  target: '_blank',
+                  rel: 'noopener noreferrer',
+                  text: '(kaart)'
+                })]
+              : null
+          ),
+          el('dt', { text: 'Monteur' }),
+          el('dd', { text: w.monteur ? `${w.monteur.naam} (${w.monteur.id})` : 'Niet toegewezen' }),
+          el('dt', { text: 'Aangemaakt' }),
+          el('dd', { text: datumTijd(w.aangemaaktOp) })
+        ),
+
+        el('h4', { text: `Taken (${klaar} van ${taken.length} gereed)` }),
+        taken.length === 0
+          ? el('p', { class: 'leeg', text: 'Geen taken.' })
+          : el('ul', { class: 'taken' }, taken.map((t) =>
+              el('li', { 'data-gereed': String(Boolean(t.gereed)) },
+                el('input', { type: 'checkbox', disabled: true, checked: Boolean(t.gereed) ? true : false,
+                              'aria-label': t.omschrijving }),
+                el('span', { class: 'taak-tekst', text: t.omschrijving })
+              ))),
+
+        el('h4', { text: 'Materiaal' }),
+        materiaal.length === 0
+          ? el('p', { class: 'leeg', text: 'Geen materiaal nodig.' })
+          : el('table', {},
+              el('thead', {}, el('tr', {},
+                el('th', { text: 'Artikel' }),
+                el('th', { text: 'Omschrijving' }),
+                el('th', { class: 'getal', text: 'Aantal' }))),
+              el('tbody', {}, materiaal.map((m) => el('tr', {},
+                el('td', { text: m.artikelnr }),
+                el('td', { text: m.omschrijving }),
+                el('td', { class: 'getal', text: String(m.aantal) }))))),
+
+        el('div', { class: 'voet' },
+          el('span', { text: 'Opgehaald om ' + tijd(opgehaald) }),
+          el('button', { type: 'button', class: 'knop', onclick: () => haalWerkorderOp(melding) }, 'Vernieuwen')
+        )
+      );
+    }
+
+    // ----------------------------------------------------------------
+    // Start
+    // ----------------------------------------------------------------
+    tekenLijst();
+    tekenDetail();
+    verbind();
+  </script>
 </body>
 </html>
