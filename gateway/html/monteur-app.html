@@ -45,6 +45,7 @@
     }
 
     * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
 
     body {
       margin: 0;
@@ -70,6 +71,33 @@
       border-bottom: 1px solid var(--border);
     }
     .kop h1 { margin: 0; font-size: 1.1rem; }
+    .kop-rechts {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 8px 14px;
+    }
+    .gebruiker { font-size: 0.85rem; color: var(--muted); }
+
+    /* ---------- Keuzescherm (demo-inlog) ---------- */
+    .keuze { max-width: 480px; margin: 24px auto; padding: 0 16px; }
+    .keuze-inhoud { padding: 16px; }
+    .keuze-inhoud .uitleg { margin: 0; color: var(--muted); font-size: 0.9rem; }
+    .keuze-knoppen { display: grid; gap: 8px; margin: 14px 0 22px; }
+    .keuze-inhoud label { display: block; margin-bottom: 6px; color: var(--muted); font-size: 0.9rem; }
+    .keuze-inhoud input {
+      width: 100%;
+      min-height: 40px;
+      margin-bottom: 10px;
+      padding: 0 12px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--surface);
+      color: var(--text);
+      font: inherit;
+    }
+    .keuze-fout { margin: 8px 0 0; min-height: 1.4em; color: var(--danger); font-size: 0.9rem; }
 
     .verbinding {
       display: inline-flex;
@@ -279,9 +307,12 @@
 <body>
   <header class="kop">
     <h1>Mijn werkorders</h1>
-    <div id="verbinding" class="verbinding" data-toestand="verbinden" role="status" aria-live="polite">
-      <span class="stip" aria-hidden="true"></span>
-      <span id="verbinding-tekst">Verbinden…</span>
+    <div class="kop-rechts">
+      <span id="gebruiker" class="gebruiker" hidden></span>
+      <div id="verbinding" class="verbinding" data-toestand="verbinden" role="status" aria-live="polite">
+        <span class="stip" aria-hidden="true"></span>
+        <span id="verbinding-tekst">Verbinden…</span>
+      </div>
     </div>
   </header>
 
@@ -297,13 +328,26 @@
     </section>
   </main>
 
+  <div id="keuze" class="keuze" hidden></div>
+
   <script>
     'use strict';
 
     // ----------------------------------------------------------------
     // Instellingen
     // ----------------------------------------------------------------
-    const WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
+    const MONTEUR_PATROON = /^M-\d+$/;
+    const DEMO_MONTEURS = [
+      { id: 'M-017', naam: 'J. de Vries' },
+      { id: 'M-022', naam: 'S. Jansen' }
+    ];
+
+    // Wie is de monteur? Uit de adresbalk: http://localhost/?monteur=M-017
+    // Dit is een identificatie voor de demo, nog geen echte inlog met wachtwoord of token.
+    const gekozen = new URLSearchParams(location.search).get('monteur');
+    const monteurId = gekozen && MONTEUR_PATROON.test(gekozen) ? gekozen : null;
+
+    const WS_BASIS = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
     const API_BASIS = '/api/werkorders/';
     const MAX_MELDINGEN = 50;
     const API_TIMEOUT_MS = 8000;
@@ -326,6 +370,70 @@
       verzoekNummer: 0,       // om verouderde antwoorden te negeren
       detail: { fase: 'leeg' } // leeg | laden | ok | fout
     };
+
+    // ----------------------------------------------------------------
+    // Bewaren in de browser (localStorage), per monteur
+    // Zo blijft de lijst bestaan na wisselen van monteur of herladen.
+    // Let op: dit is alleen een lokale kopie in deze browser. Meldingen die
+    // binnenkwamen terwijl de app dicht was, staan hier niet in.
+    // Alles is in try/catch gezet: opslag kan geblokkeerd of vol zijn.
+    // ----------------------------------------------------------------
+    const OPSLAG_SLEUTEL = 'meldingen:' + monteurId;
+
+    function bewaar() {
+      try {
+        const opTeSlaan = toestand.meldingen.map((m) => ({
+          nr: m.nr,
+          eventId: m.eventId,
+          werkorderId: m.werkorderId,
+          status: m.status,
+          bericht: m.bericht,
+          tijdstip: m.tijdstip,
+          ontvangen: m.ontvangen.toISOString(),
+          inhaal: m.inhaal,
+          nieuw: m.nieuw
+        }));
+        localStorage.setItem(OPSLAG_SLEUTEL, JSON.stringify(opTeSlaan));
+      } catch (fout) {
+        console.warn('Meldingen niet bewaard:', fout.message);
+      }
+    }
+
+    function herstel() {
+      try {
+        const tekst = localStorage.getItem(OPSLAG_SLEUTEL);
+        if (!tekst) return;
+        const lijst = JSON.parse(tekst);
+        if (!Array.isArray(lijst)) return;
+
+        toestand.meldingen = lijst
+          .filter((m) => m && typeof m.werkorderId === 'string' && Number.isInteger(m.nr))
+          .map((m) => {
+            const ontvangen = new Date(m.ontvangen);
+            return {
+              nr: m.nr,
+              eventId: typeof m.eventId === 'string' && m.eventId ? m.eventId : null,
+              werkorderId: m.werkorderId,
+              status: typeof m.status === 'string' ? m.status : '',
+              bericht: typeof m.bericht === 'string' ? m.bericht : '',
+              // Oudere bewaarde meldingen hebben geen servertijdstip: dan het moment van ontvangst
+              tijdstip: Number.isFinite(m.tijdstip) ? m.tijdstip : ontvangen.getTime(),
+              ontvangen,
+              inhaal: m.inhaal === true,
+              nieuw: m.nieuw === true,
+              vers: false
+            };
+          })
+          .filter((m) => !Number.isNaN(m.ontvangen.getTime()))
+          .sort((a, b) => (b.tijdstip - a.tijdstip) || (b.nr - a.nr))
+          .slice(0, MAX_MELDINGEN);
+
+        toestand.volgnummer = toestand.meldingen.reduce((hoogste, m) => Math.max(hoogste, m.nr), 0);
+      } catch (fout) {
+        console.warn('Bewaarde meldingen onleesbaar, we beginnen leeg:', fout.message);
+        toestand.meldingen = [];
+      }
+    }
 
     // ----------------------------------------------------------------
     // Hulpfuncties
@@ -379,12 +487,22 @@
       document.getElementById('verbinding-tekst').textContent = tekst;
     }
 
+    // Bij elke verbinding vertellen we de server vanaf wanneer we meldingen missen:
+    // het tijdstip van de nieuwste melding die we hebben, of het begin der tijden als we niets hebben.
+    // De server stuurt dan na wat hij voor ons bewaard heeft (inclusief die laatste, die we ontdubbelen).
+    function maakWsUrl() {
+      const nieuwste = toestand.meldingen.reduce((hoogste, m) => Math.max(hoogste, m.tijdstip), 0);
+      const sinds = new Date(nieuwste).toISOString();
+      return WS_BASIS + '?monteurId=' + encodeURIComponent(monteurId) +
+        '&since=' + encodeURIComponent(sinds);
+    }
+
     function verbind() {
       clearInterval(aftelTimer);
       zetVerbinding('verbinden', 'Verbinden…');
 
       try {
-        socket = new WebSocket(WS_URL);
+        socket = new WebSocket(maakWsUrl());
       } catch (fout) {
         planOpnieuw();
         return;
@@ -406,7 +524,14 @@
         verwerkBericht(bericht);
       });
 
-      socket.addEventListener('close', planOpnieuw);
+      socket.addEventListener('close', (gebeurtenis) => {
+        if (gebeurtenis.code === 1008) {
+          // De server weigert deze verbinding bewust; opnieuw proberen heeft geen zin.
+          zetVerbinding('verbroken', 'Verbinding geweigerd: ' + (gebeurtenis.reason || 'niet toegestaan'));
+          return;
+        }
+        planOpnieuw();
+      });
       socket.addEventListener('error', () => { /* 'close' volgt altijd; daar handelen we het af */ });
     }
 
@@ -444,17 +569,32 @@
         return;
       }
 
+      // Dezelfde melding kan twee keer komen (bij inhalen, of bij herlevering door Kafka)
+      const eventId = typeof bericht.eventId === 'string' && bericht.eventId ? bericht.eventId : null;
+      if (eventId && toestand.meldingen.some((m) => m.eventId === eventId)) return;
+
+      // Het tijdstip komt van de server (Kafka). Zonder geldig tijdstip nemen we het moment van ontvangst.
+      const serverTijd = typeof bericht.tijdstip === 'string' ? Date.parse(bericht.tijdstip) : NaN;
+      const tijdstip = Number.isNaN(serverTijd) ? Date.now() : serverTijd;
+
       toestand.volgnummer += 1;
-      toestand.meldingen.unshift({
+      toestand.meldingen.push({
         nr: toestand.volgnummer,
+        eventId,
         werkorderId: bericht.werkorderId,
         status: typeof bericht.status === 'string' ? bericht.status : '',
         bericht: typeof bericht.bericht === 'string' ? bericht.bericht : '',
-        ontvangen: new Date(),
+        tijdstip,
+        ontvangen: new Date(tijdstip),
+        inhaal: bericht.inhaal === true, // gemist en nu alsnog opgehaald
         nieuw: true,  // ongelezen, tot de monteur de melding opent
         vers: true    // alleen voor de oplicht-animatie bij binnenkomst
       });
+
+      // Nieuwste bovenaan, op het tijdstip van de melding (ingehaalde komen zo op de juiste plek)
+      toestand.meldingen.sort((a, b) => (b.tijdstip - a.tijdstip) || (b.nr - a.nr));
       toestand.meldingen.length = Math.min(toestand.meldingen.length, MAX_MELDINGEN);
+      bewaar();
       tekenLijst();
     }
 
@@ -485,7 +625,10 @@
             melding.status ? statusBadge(melding.status) : null
           ),
           melding.bericht ? el('div', { class: 'melding-tekst', text: melding.bericht }) : null,
-          el('div', { class: 'melding-tijd', text: 'Ontvangen om ' + tijd(melding.ontvangen) })
+          el('div', {
+            class: 'melding-tijd',
+            text: 'Gemeld om ' + tijd(melding.ontvangen) + (melding.inhaal ? ' · ingehaald' : '')
+          })
         );
         lijst.append(el('li', {}, knop));
         melding.vers = false; // animatie speelt alleen bij de eerste tekening
@@ -497,6 +640,7 @@
       const melding = toestand.meldingen.find((m) => m.nr === nr);
       if (!melding) return;
       melding.nieuw = false;
+      bewaar();
       toestand.geselecteerd = nr;
       document.getElementById('hoofd').dataset.weergave = 'detail';
       tekenLijst();
@@ -664,9 +808,69 @@
     // ----------------------------------------------------------------
     // Start
     // ----------------------------------------------------------------
-    tekenLijst();
-    tekenDetail();
-    verbind();
+    function toonKeuze() {
+      document.getElementById('hoofd').hidden = true;
+      document.getElementById('verbinding').hidden = true;
+
+      const houder = document.getElementById('keuze');
+      houder.hidden = false;
+      leegMaken(houder);
+
+      const kies = (id) => { location.search = '?monteur=' + encodeURIComponent(id); };
+
+      const invoer = el('input', {
+        type: 'text',
+        id: 'monteur-invoer',
+        placeholder: 'bijvoorbeeld M-017',
+        autocomplete: 'off',
+        'aria-describedby': 'monteur-fout'
+      });
+      const fout = el('p', { id: 'monteur-fout', class: 'keuze-fout', role: 'alert' });
+
+      const formulier = el('form', {
+        onsubmit: (gebeurtenis) => {
+          gebeurtenis.preventDefault();
+          const waarde = invoer.value.trim().toUpperCase();
+          if (!MONTEUR_PATROON.test(waarde)) {
+            fout.textContent = 'Een monteur-id is "M-" gevolgd door cijfers, bijvoorbeeld M-017.';
+            return;
+          }
+          kies(waarde);
+        }
+      },
+        el('label', { for: 'monteur-invoer', text: 'Of vul een monteur-id in' }),
+        invoer,
+        el('button', { type: 'submit', class: 'knop', text: 'Doorgaan' }),
+        fout
+      );
+
+      houder.append(el('section', { class: 'paneel' },
+        el('h2', { text: 'Wie ben je?' }),
+        el('div', { class: 'keuze-inhoud' },
+          el('p', { class: 'uitleg', text: 'Demo-inlog: er is nog geen echte authenticatie.' }),
+          el('div', { class: 'keuze-knoppen' },
+            DEMO_MONTEURS.map((m) => el('button', {
+              type: 'button',
+              class: 'knop',
+              onclick: () => kies(m.id)
+            }, `${m.naam} (${m.id})`))
+          ),
+          formulier
+        )
+      ));
+    }
+
+    if (monteurId) {
+      const gebruiker = document.getElementById('gebruiker');
+      gebruiker.hidden = false;
+      gebruiker.append('Ingelogd als ' + monteurId + ' · ', el('a', { href: location.pathname, text: 'wissel' }));
+      herstel();
+      tekenLijst();
+      tekenDetail();
+      verbind();
+    } else {
+      toonKeuze();
+    }
   </script>
 </body>
 </html>
