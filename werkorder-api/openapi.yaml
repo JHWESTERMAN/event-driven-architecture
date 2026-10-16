@@ -1,0 +1,283 @@
+openapi: 3.0.3
+
+info:
+  title: Werkorder API
+  version: 1.0.0
+  description: |
+    Synchrone API om de volledige werkorder op te halen nadat de monteur een
+    (dunne) notificatie heeft ontvangen.
+
+    Het Kafka-event en de WebSocket-notificatie bevatten alleen `werkorderId`,
+    `status` en `bericht`. Deze API levert het volledige detail op het moment dat
+    de monteur het nodig heeft, zodat hij altijd de actuele toestand ziet.
+
+servers:
+  - url: http://localhost
+    description: Lokale API-gateway (nginx)
+
+tags:
+  - name: Werkorders
+    description: Werkorders ophalen
+  - name: Beheer
+    description: Gezondheidscontrole
+
+paths:
+  /api/werkorders:
+    get:
+      tags: [Werkorders]
+      operationId: lijstWerkorders
+      summary: Lijst met werkorders
+      description: Compacte lijst, optioneel gefilterd op status en beperkt in aantal.
+      parameters:
+        - name: status
+          in: query
+          required: false
+          description: Alleen werkorders met deze status.
+          schema:
+            $ref: '#/components/schemas/Status'
+        - name: limit
+          in: query
+          required: false
+          description: Maximaal aantal resultaten.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        '200':
+          description: Lijst met werkorders.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WerkorderLijst'
+              example:
+                totaal: 1
+                items:
+                  - werkorderId: WO-1001
+                    status: OPEN
+                    prioriteit: HOOG
+                    omschrijving: Storing wissel 214, wisselmotor reageert niet
+        '400':
+          $ref: '#/components/responses/OngeldigVerzoek'
+
+  /api/werkorders/{werkorderId}:
+    get:
+      tags: [Werkorders]
+      operationId: haalWerkorderOp
+      summary: Volledige werkorder ophalen
+      description: Geeft alle gegevens van één werkorder, inclusief taken en materiaal.
+      parameters:
+        - name: werkorderId
+          in: path
+          required: true
+          description: Identificatie van de werkorder, `WO-` gevolgd door cijfers.
+          schema:
+            type: string
+            pattern: '^WO-[0-9]+$'
+          example: WO-1002
+      responses:
+        '200':
+          description: De volledige werkorder.
+          headers:
+            Cache-Control:
+              description: Altijd `no-store`, zodat de monteur nooit een verouderde werkorder ziet.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Werkorder'
+        '400':
+          $ref: '#/components/responses/OngeldigVerzoek'
+        '404':
+          $ref: '#/components/responses/NietGevonden'
+
+  /health:
+    get:
+      tags: [Beheer]
+      operationId: gezondheid
+      summary: Gezondheidscontrole
+      responses:
+        '200':
+          description: De service draait.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    enum: [UP]
+
+components:
+  responses:
+    OngeldigVerzoek:
+      description: Het verzoek is ongeldig (bijvoorbeeld een verkeerde status of een ongeldig id).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Probleem'
+          example:
+            status: 400
+            title: Bad Request
+            detail: "status 'KAPOT' is ongeldig (toegestaan: OPEN, IN_BEHANDELING, AFGEROND)"
+    NietGevonden:
+      description: De werkorder bestaat niet.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Probleem'
+          example:
+            status: 404
+            title: Not Found
+            detail: Werkorder WO-9999 bestaat niet
+
+  schemas:
+    Status:
+      type: string
+      description: Status van de werkorder. Dezelfde lijst als in het Kafka-berichtcontract.
+      enum: [OPEN, IN_BEHANDELING, AFGEROND]
+
+    Prioriteit:
+      type: string
+      enum: [HOOG, NORMAAL, LAAG]
+
+    Coordinaten:
+      type: object
+      required: [lat, lon]
+      properties:
+        lat:
+          type: number
+          minimum: -90
+          maximum: 90
+        lon:
+          type: number
+          minimum: -180
+          maximum: 180
+
+    Locatie:
+      type: object
+      required: [plaats, spoorEmplacement, coordinaten]
+      properties:
+        plaats:
+          type: string
+        spoorEmplacement:
+          type: string
+        coordinaten:
+          $ref: '#/components/schemas/Coordinaten'
+
+    Monteur:
+      type: object
+      required: [id, naam]
+      properties:
+        id:
+          type: string
+          example: M-017
+        naam:
+          type: string
+
+    Taak:
+      type: object
+      required: [taakId, omschrijving, gereed]
+      properties:
+        taakId:
+          type: string
+          example: T-1
+        omschrijving:
+          type: string
+        gereed:
+          type: boolean
+
+    Materiaal:
+      type: object
+      required: [artikelnr, omschrijving, aantal]
+      properties:
+        artikelnr:
+          type: string
+        omschrijving:
+          type: string
+        aantal:
+          type: integer
+          minimum: 1
+
+    Werkorder:
+      type: object
+      required:
+        - werkorderId
+        - status
+        - prioriteit
+        - omschrijving
+        - locatie
+        - monteur
+        - aangemaaktOp
+        - taken
+        - materiaal
+      properties:
+        werkorderId:
+          type: string
+          pattern: '^WO-[0-9]+$'
+          example: WO-1001
+        status:
+          $ref: '#/components/schemas/Status'
+        prioriteit:
+          $ref: '#/components/schemas/Prioriteit'
+        omschrijving:
+          type: string
+        locatie:
+          $ref: '#/components/schemas/Locatie'
+        monteur:
+          $ref: '#/components/schemas/Monteur'
+        aangemaaktOp:
+          type: string
+          format: date-time
+        taken:
+          type: array
+          description: Kardinaliteit 0..*. Een lege lijst betekent "geen taken", niet "onbekend".
+          items:
+            $ref: '#/components/schemas/Taak'
+        materiaal:
+          type: array
+          description: Kardinaliteit 0..*. Een lege lijst betekent "geen materiaal nodig".
+          items:
+            $ref: '#/components/schemas/Materiaal'
+
+    WerkorderSamenvatting:
+      type: object
+      required: [werkorderId, status, prioriteit, omschrijving]
+      properties:
+        werkorderId:
+          type: string
+          pattern: '^WO-[0-9]+$'
+        status:
+          $ref: '#/components/schemas/Status'
+        prioriteit:
+          $ref: '#/components/schemas/Prioriteit'
+        omschrijving:
+          type: string
+
+    WerkorderLijst:
+      type: object
+      required: [totaal, items]
+      properties:
+        totaal:
+          type: integer
+          minimum: 0
+          description: Aantal werkorders dat aan het filter voldoet, vóór toepassing van `limit`.
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/WerkorderSamenvatting'
+
+    Probleem:
+      type: object
+      description: Vaste foutstructuur (in de stijl van RFC 7807).
+      required: [status, title, detail]
+      properties:
+        status:
+          type: integer
+        title:
+          type: string
+        detail:
+          type: string

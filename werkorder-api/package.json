@@ -1,0 +1,9 @@
+{
+  "name": "werkorder-api",
+  "version": "1.0.0",
+  "description": "Synchrone REST-API om de volledige werkorder op te halen",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  }
+}

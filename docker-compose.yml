@@ -62,6 +62,15 @@ services:
       - "8080"
     restart: unless-stopped
 
+  werkorder-api:
+    build: ./werkorder-api
+    container_name: werkorder-api
+    restart: unless-stopped
+    environment:
+      PORT: 8081
+    expose:
+      - "8081" 
+
   api-gateway:
     image: nginx:alpine
     container_name: api-gateway
@@ -72,6 +81,7 @@ services:
       - ./gateway/html:/usr/share/nginx/html:ro
     depends_on:
       - ws-microservice
+      - werkorder-api
 
 volumes:
   redpanda-data:
