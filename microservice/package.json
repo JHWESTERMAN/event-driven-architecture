@@ -1,0 +1,13 @@
+{
+  "name": "werkverder-ws-microservice",
+  "version": "1.0.0",
+  "description": "Kwfka Consumer to WebSocket Broadcast Microservice",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "kafkajs": "^2.2.4",
+    "ws": "^8.16.0"
+  }
+}

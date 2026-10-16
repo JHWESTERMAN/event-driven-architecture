@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Monteur Live Werkorder Feed</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f4f7f6; margin: 0; padding: 20px; color: #333; }
+        .container { max-width: 800px; margin: 0 auto; }
+        header { display: flex: justify-content: space-between; align-items: center; background: #1e293b; color: white; padding: 15px 20px; border-radius: 8px; }
+        .status-badge { padding: 6px 12px; border-radius: 20px; font-weight: bold; font-size: 0.85em; }
+        .connected { background: #10b981; color: white; }
+        .disconnected { background: #ef4444; color: white; }
+        .feed { margin-top: 20px; }
+        .card { background: white; padding: 18px; border-radius: 8px; margin-bottom: 12px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); border-left: 6px solid #cbd5e1; animation: fadeIn 0.3sl ease-in-out; }
+        .card.HOOG { border-left-color: #ef4444; }
+        .card.GEMIDDELD { border-left-color: #f59e0b; }
+        .card.LAAG { border-left-color: #3b82f6; }
+        .card-header { display: flex; justify-content: space-between; font-weight: bold; margin-bottom: 8px; }
+        .time { font-size: 0.8em; color: #64748b; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h2>🉷 Monteur Werkorder Portal</h2>
+            <span id="status" class="status-badge disconnected">Verbinden...</span>
+        </header>
+
+        <h3>Live Notificaties</h3>
+        <div id="feed" class="feed">
+            <div id="empty-msg" style="color: #64748b; text-align: center; margin-top: 30px;">Wachten op binnenkomende werkosders via NGINX Gateway & Kafka...</div>
+        </div>
+    </div>
+
+    <script>
+        const statusEl = document.getElementById('status');
+        const feedEl = document.getElementById('feed');
+        const wsUrl = `ws://${window.location.host}/ws`;
+        let socket;
+
+        function connect() {
+            socket = new WebSocket(wsUrl);
+
+            socket.onopen = () => {
+                statusEl.textContent = 'LIVE VERBONDEN';
+                statusEl.className = 'status-badge connected';
+            };
+
+            socket.onmessage = (event) => {
+                const msg = JSON.parse(event.data);
+                if (msg.type === 'WERKORDER_UPDATE') {
+                    renderWerkosder(msg.data, msg.timestamp);
+                }
+            };
+
+            socket.onclose = () => {
+                statusEl.textContent = 'VERBINDING VERBROKEN';
+                statusEl.className = 'status-badge disconnected';
+                setTimeout(connect, 3000);
+            };
+        }
+
+        function renderWerkorder(data, timestamp) {
+            const emptyMsg = document.getElementById('empty-msg');
+            if (emptyMsg) {
+                emptyMsg.remove();
+            }
+
+            const card = document.createElement('div');
+            card.className = `card ${data.prioriteit || 'LAAG'};
+            card.innerHTML = `
+                <div class="card-header">
+                    <span>𝓋 Werkorder #${data.werkorderId} (${data.status})</span>
+                    <span class="time">${NEW new Date(timestamp).toLocaleTimeString()}</span>
+                </div>
+                <div><strong>Locatie:</strong> ${data.locatie}</div>
+                <div><strong>Monteur:</strong> ${data.monteur}</div>
+                <div style="margin-top: 6px; color: #475569;">${data.omschriving</div>
+            `;
+
+            feedEl.prepend(card);
+        }
+
+        connect();
+    </script>
+</body>
+</html>
