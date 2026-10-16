@@ -19,9 +19,12 @@ vingerafdruk() { cat "$@" | shasum -a 256 | cut -c1-12; }
 GATEWAY_HASH="$(vingerafdruk k8s/gateway/nginx.conf gateway/html/monteur-app.html)"
 REALM_HASH="$(vingerafdruk keycloak/werkorders-realm.json)"
 
-echo "==> 1/6 Images bouwen in de cloud (tag ${TAG})"
-az acr build --registry "$ACR" --image "ws-microservice:${TAG}" ./microservice
-az acr build --registry "$ACR" --image "werkorder-api:${TAG}" ./werkorder-api
+echo "==> 1/6 Images bouwen (lokaal, voor linux/amd64) en naar de registry pushen (tag ${TAG})"
+az acr login --name "$ACR"
+docker build --platform linux/amd64 -t "${REGISTRY}/ws-microservice:${TAG}" ./microservice
+docker push "${REGISTRY}/ws-microservice:${TAG}"
+docker build --platform linux/amd64 -t "${REGISTRY}/werkorder-api:${TAG}" ./werkorder-api
+docker push "${REGISTRY}/werkorder-api:${TAG}"
 
 echo "==> 2/6 Namespace, configuratie en geheimen"
 kubectl apply -f k8s/00-namespace.yaml
