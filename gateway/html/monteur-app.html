@@ -80,24 +80,10 @@
     }
     .gebruiker { font-size: 0.85rem; color: var(--muted); }
 
-    /* ---------- Keuzescherm (demo-inlog) ---------- */
+    /* ---------- Statusschermen (inloggen, uitgelogd, fout) ---------- */
     .keuze { max-width: 480px; margin: 24px auto; padding: 0 16px; }
     .keuze-inhoud { padding: 16px; }
-    .keuze-inhoud .uitleg { margin: 0; color: var(--muted); font-size: 0.9rem; }
-    .keuze-knoppen { display: grid; gap: 8px; margin: 14px 0 22px; }
-    .keuze-inhoud label { display: block; margin-bottom: 6px; color: var(--muted); font-size: 0.9rem; }
-    .keuze-inhoud input {
-      width: 100%;
-      min-height: 40px;
-      margin-bottom: 10px;
-      padding: 0 12px;
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      background: var(--surface);
-      color: var(--text);
-      font: inherit;
-    }
-    .keuze-fout { margin: 8px 0 0; min-height: 1.4em; color: var(--danger); font-size: 0.9rem; }
+    .keuze-inhoud .uitleg { margin: 0 0 16px; color: var(--muted); }
 
     .verbinding {
       display: inline-flex;
@@ -309,14 +295,15 @@
     <h1>Mijn werkorders</h1>
     <div class="kop-rechts">
       <span id="gebruiker" class="gebruiker" hidden></span>
-      <div id="verbinding" class="verbinding" data-toestand="verbinden" role="status" aria-live="polite">
+      <button id="herlogin" type="button" class="knop" hidden>Opnieuw inloggen</button>
+      <div id="verbinding" class="verbinding" data-toestand="verbinden" role="status" aria-live="polite" hidden>
         <span class="stip" aria-hidden="true"></span>
         <span id="verbinding-tekst">Verbinden…</span>
       </div>
     </div>
   </header>
 
-  <main id="hoofd" data-weergave="lijst">
+  <main id="hoofd" data-weergave="lijst" hidden>
     <section id="lijst-paneel" class="paneel" aria-labelledby="lijst-kop">
       <h2 id="lijst-kop">Meldingen</h2>
       <div id="lijst"></div>
@@ -337,15 +324,15 @@
     // Instellingen
     // ----------------------------------------------------------------
     const MONTEUR_PATROON = /^M-\d+$/;
-    const DEMO_MONTEURS = [
-      { id: 'M-017', naam: 'J. de Vries' },
-      { id: 'M-022', naam: 'S. Jansen' }
-    ];
 
-    // Wie is de monteur? Uit de adresbalk: http://localhost/?monteur=M-017
-    // Dit is een identificatie voor de demo, nog geen echte inlog met wachtwoord of token.
-    const gekozen = new URLSearchParams(location.search).get('monteur');
-    const monteurId = gekozen && MONTEUR_PATROON.test(gekozen) ? gekozen : null;
+    // Inloggen via Keycloak (OpenID Connect). De uitgever-URL is het adres waarmee DEZE BROWSER bij Keycloak komt.
+    // Lokaal (Docker Compose of kubectl port-forward) is dat poort 8180 op localhost. Voor een andere omgeving
+    // pas je OIDC_ISSUER aan, en zet je dezelfde waarde in OIDC_ISSUER van de services en in KC_HOSTNAME van Keycloak.
+    const OIDC_ISSUER = 'http://localhost:8180/realms/werkorders';
+    const OIDC_CLIENT_ID = 'monteur-app';
+    const OIDC_PAD = OIDC_ISSUER + '/protocol/openid-connect';
+    const REDIRECT_URI = location.origin + location.pathname;
+    const VERNIEUW_MARGE_MS = 30000; // token vernieuwen als het binnen 30 seconden verloopt
 
     const WS_BASIS = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
     const API_BASIS = '/api/werkorders/';
@@ -378,7 +365,8 @@
     // binnenkwamen terwijl de app dicht was, staan hier niet in.
     // Alles is in try/catch gezet: opslag kan geblokkeerd of vol zijn.
     // ----------------------------------------------------------------
-    const OPSLAG_SLEUTEL = 'meldingen:' + monteurId;
+    // De sleutel bevat het monteur-id uit het token, zodat twee monteurs op één apparaat elkaars lijst niet zien.
+    const opslagSleutel = () => 'meldingen:' + sessie.monteurId;
 
     function bewaar() {
       try {
@@ -393,7 +381,7 @@
           inhaal: m.inhaal,
           nieuw: m.nieuw
         }));
-        localStorage.setItem(OPSLAG_SLEUTEL, JSON.stringify(opTeSlaan));
+        localStorage.setItem(opslagSleutel(), JSON.stringify(opTeSlaan));
       } catch (fout) {
         console.warn('Meldingen niet bewaard:', fout.message);
       }
@@ -401,7 +389,7 @@
 
     function herstel() {
       try {
-        const tekst = localStorage.getItem(OPSLAG_SLEUTEL);
+        const tekst = localStorage.getItem(opslagSleutel());
         if (!tekst) return;
         const lijst = JSON.parse(tekst);
         if (!Array.isArray(lijst)) return;
@@ -474,6 +462,185 @@
     }
 
     // ----------------------------------------------------------------
+    // Inloggen (OpenID Connect: authorization code met PKCE, zonder geheim)
+    //
+    // 1. Geen sessie? Dan sturen we de browser naar Keycloak, met een willekeurige "verifier" (bewaard in
+    //    sessionStorage) waarvan alleen de hash meegaat. Daarmee kan niemand die de code onderschept hem inwisselen.
+    // 2. Keycloak stuurt de browser terug met een code. Die wisselen we in voor tokens.
+    // 3. De tokens leven alleen in het geheugen van deze pagina, nooit in localStorage.
+    //    Na herladen logt de app opnieuw in; Keycloak herkent de sessie, dus dat gaat zonder wachtwoord.
+    // 4. Het access token is kort geldig (5 minuten) en wordt vernieuwd met het refresh token.
+    //
+    // De app leest het token alleen om de naam en het monteur-id te tonen. De ECHTE controle (handtekening,
+    // eigenaar) doen de services: wat de browser zelf over zichzelf beweert, wordt nooit vertrouwd.
+    // ----------------------------------------------------------------
+    const $ = (id) => document.getElementById(id);
+    const sessie = { access: null, refresh: null, idToken: null, verlooptOp: 0, monteurId: null, naam: '' };
+    let verversBezig = null;
+
+    function opslagLees(sleutel) {
+      try { return sessionStorage.getItem(sleutel); } catch (fout) { return null; }
+    }
+    function opslagSchrijf(sleutel, waarde) {
+      try { sessionStorage.setItem(sleutel, waarde); return true; } catch (fout) { return false; }
+    }
+    function opslagWis(sleutel) {
+      try { sessionStorage.removeItem(sleutel); } catch (fout) { /* niets aan te doen */ }
+    }
+
+    function base64url(bytes) {
+      let tekst = '';
+      for (const byte of bytes) tekst += String.fromCharCode(byte);
+      return btoa(tekst).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    }
+
+    function willekeurig(aantalBytes) {
+      return base64url(crypto.getRandomValues(new Uint8Array(aantalBytes)));
+    }
+
+    async function pkceChallenge(verifier) {
+      const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+      return base64url(new Uint8Array(hash));
+    }
+
+    function decodeerPayload(jwt) {
+      const deel = jwt.split('.')[1] || '';
+      const binair = atob(deel.replace(/-/g, '+').replace(/_/g, '/'));
+      const json = decodeURIComponent(Array.from(binair, (c) => '%' + c.charCodeAt(0).toString(16).padStart(2, '0')).join(''));
+      return JSON.parse(json);
+    }
+
+    function zetSessie(tokens) {
+      const claims = decodeerPayload(tokens.access_token);
+      const monteurId = String(claims.preferred_username || '').toUpperCase();
+      if (!MONTEUR_PATROON.test(monteurId)) throw new Error('Dit account is geen monteur-account.');
+
+      sessie.access = tokens.access_token;
+      sessie.refresh = tokens.refresh_token || sessie.refresh;
+      sessie.idToken = tokens.id_token || sessie.idToken;
+      // We rekenen met "expires_in" (relatief) en niet met de klok in het token, zodat een afwijkende klok niet uitmaakt
+      sessie.verlooptOp = Date.now() + (Number(tokens.expires_in) || 60) * 1000;
+      sessie.monteurId = monteurId;
+      sessie.naam = typeof claims.name === 'string' && claims.name ? claims.name : monteurId;
+    }
+
+    async function startLogin() {
+      if (!(window.crypto && crypto.subtle)) {
+        throw new Error('Inloggen werkt alleen via https of op localhost: de browser biedt hier geen versleuteling aan.');
+      }
+      const verifier = willekeurig(48);
+      const state = willekeurig(16);
+      if (!opslagSchrijf('pkce-verifier', verifier) || !opslagSchrijf('pkce-state', state)) {
+        throw new Error('De browser staat geen sessieopslag toe, en daar is inloggen op aangewezen.');
+      }
+      const url = new URL(OIDC_PAD + '/auth');
+      url.search = new URLSearchParams({
+        client_id: OIDC_CLIENT_ID,
+        redirect_uri: REDIRECT_URI,
+        response_type: 'code',
+        scope: 'openid',
+        code_challenge: await pkceChallenge(verifier),
+        code_challenge_method: 'S256',
+        state
+      }).toString();
+      location.assign(url.toString());
+    }
+
+    // Vraagt tokens aan bij Keycloak. Foutsoorten:
+    //   fout.herlogin      = de inlogserver zegt nee (code of refresh token ongeldig): opnieuw inloggen is nodig
+    //   fout.onbereikbaar  = de inlogserver antwoordt niet: later opnieuw proberen
+    async function tokenAanvraag(velden) {
+      let antwoord;
+      try {
+        antwoord = await fetch(OIDC_PAD + '/token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ client_id: OIDC_CLIENT_ID, ...velden }),
+          signal: AbortSignal.timeout(8000)
+        });
+      } catch (fout) {
+        const nieuw = new Error('De inlogserver is niet bereikbaar.');
+        nieuw.onbereikbaar = true;
+        throw nieuw;
+      }
+
+      let inhoud = null;
+      try { inhoud = await antwoord.json(); } catch (fout) { /* geen JSON */ }
+
+      if (!antwoord.ok || !inhoud || !inhoud.access_token) {
+        const nieuw = new Error((inhoud && (inhoud.error_description || inhoud.error)) || `Fout ${antwoord.status}`);
+        nieuw.herlogin = antwoord.status >= 400 && antwoord.status < 500;
+        nieuw.onbereikbaar = !nieuw.herlogin;
+        throw nieuw;
+      }
+      zetSessie(inhoud);
+    }
+
+    async function verwerkTerugkeer(params) {
+      if (params.get('error')) {
+        throw new Error('Inloggen mislukt: ' + (params.get('error_description') || params.get('error')));
+      }
+      const verwachteState = opslagLees('pkce-state');
+      const verifier = opslagLees('pkce-verifier');
+      opslagWis('pkce-state');      // eenmalig gebruik
+      opslagWis('pkce-verifier');
+
+      if (!verwachteState || !verifier || params.get('state') !== verwachteState || !params.get('code')) {
+        throw new Error('De terugkeer van de inlogpagina klopt niet. Probeer het opnieuw.');
+      }
+      await tokenAanvraag({
+        grant_type: 'authorization_code',
+        code: params.get('code'),
+        redirect_uri: REDIRECT_URI,
+        code_verifier: verifier
+      });
+      history.replaceState(null, '', REDIRECT_URI); // code en state uit de adresbalk halen
+    }
+
+    function ververs() {
+      if (verversBezig) return verversBezig; // meerdere tegelijk? één vernieuwing voor allemaal
+      verversBezig = (async () => {
+        if (!sessie.refresh) {
+          const fout = new Error('Er is geen sessie meer.');
+          fout.herlogin = true;
+          throw fout;
+        }
+        await tokenAanvraag({ grant_type: 'refresh_token', refresh_token: sessie.refresh });
+      })().finally(() => { verversBezig = null; });
+      return verversBezig;
+    }
+
+    async function geldigToken(forceer = false) {
+      if (forceer || !sessie.access || sessie.verlooptOp - Date.now() < VERNIEUW_MARGE_MS) {
+        await ververs();
+      }
+      return sessie.access;
+    }
+
+    function uitloggen() {
+      // Op een gedeeld apparaat hoort een volgende monteur niet de meldingen van de vorige te zien
+      try { localStorage.removeItem(opslagSleutel()); } catch (fout) { /* opslag niet beschikbaar */ }
+      const url = new URL(OIDC_PAD + '/logout');
+      const velden = { client_id: OIDC_CLIENT_ID, post_logout_redirect_uri: REDIRECT_URI + '?uitgelogd=1' };
+      if (sessie.idToken) velden.id_token_hint = sessie.idToken;
+      url.search = new URLSearchParams(velden).toString();
+      location.assign(url.toString());
+    }
+
+    // API-aanroep met token. Bij een 401 vernieuwen we het token één keer en proberen het opnieuw.
+    async function apiFetch(url, signal) {
+      for (let poging = 0; poging < 2; poging++) {
+        const token = await geldigToken(poging === 1);
+        const antwoord = await fetch(url, {
+          headers: { Accept: 'application/json', Authorization: 'Bearer ' + token },
+          cache: 'no-store',
+          signal
+        });
+        if (antwoord.status !== 401 || poging === 1) return antwoord;
+      }
+    }
+
+    // ----------------------------------------------------------------
     // Verbinding (WebSocket) met automatisch herverbinden
     // Wachttijd verdubbelt per mislukte poging, met een willekeurige vertraging,
     // zodat niet alle monteurs na een herstart tegelijk terugkomen.
@@ -490,30 +657,49 @@
     // Bij elke verbinding vertellen we de server vanaf wanneer we meldingen missen:
     // het tijdstip van de nieuwste melding die we hebben, of het begin der tijden als we niets hebben.
     // De server stuurt dan na wat hij voor ons bewaard heeft (inclusief die laatste, die we ontdubbelen).
+    // Het token zit niet in de URL (die komt in logs terecht) maar gaat als eerste bericht mee.
     function maakWsUrl() {
       const nieuwste = toestand.meldingen.reduce((hoogste, m) => Math.max(hoogste, m.tijdstip), 0);
-      const sinds = new Date(nieuwste).toISOString();
-      return WS_BASIS + '?monteurId=' + encodeURIComponent(monteurId) +
-        '&since=' + encodeURIComponent(sinds);
+      return WS_BASIS + '?since=' + encodeURIComponent(new Date(nieuwste).toISOString());
     }
 
-    function verbind() {
+    let laatste4401 = 0;
+
+    async function verbind() {
       clearInterval(aftelTimer);
+      $('herlogin').hidden = true;
       zetVerbinding('verbinden', 'Verbinden…');
 
+      // Eerst een geldig token (zo nodig vernieuwen)
+      let token;
       try {
-        socket = new WebSocket(maakWsUrl());
+        token = await geldigToken();
+      } catch (fout) {
+        if (fout.herlogin) {
+          zetVerbinding('verbroken', 'Je sessie is verlopen');
+          $('herlogin').hidden = false;
+        } else {
+          planOpnieuw(); // inlogserver tijdelijk weg: opnieuw proberen met uitstel
+        }
+        return;
+      }
+
+      let dezeSocket;
+      try {
+        dezeSocket = new WebSocket(maakWsUrl());
       } catch (fout) {
         planOpnieuw();
         return;
       }
+      socket = dezeSocket;
 
-      socket.addEventListener('open', () => {
-        pogingen = 0;
-        zetVerbinding('verbonden', 'Verbonden');
+      dezeSocket.addEventListener('open', () => {
+        // Eerste bericht: wie ben ik. Pas daarna weet de server voor wie hij meldingen heeft.
+        dezeSocket.send(JSON.stringify({ type: 'AUTH', token }));
       });
 
-      socket.addEventListener('message', (gebeurtenis) => {
+      dezeSocket.addEventListener('message', (gebeurtenis) => {
+        if (dezeSocket !== socket) return; // bericht van een verouderde verbinding
         let bericht;
         try {
           bericht = JSON.parse(gebeurtenis.data);
@@ -521,18 +707,38 @@
           console.warn('Onleesbaar bericht genegeerd:', gebeurtenis.data);
           return;
         }
+        if (bericht && bericht.type === 'SYSTEM') {
+          // De server heeft ons token geaccepteerd: nu pas zijn we echt verbonden
+          pogingen = 0;
+          zetVerbinding('verbonden', 'Verbonden');
+          return;
+        }
         verwerkBericht(bericht);
       });
 
-      socket.addEventListener('close', (gebeurtenis) => {
+      dezeSocket.addEventListener('close', (gebeurtenis) => {
+        if (dezeSocket !== socket) return;
+
+        if (gebeurtenis.code === 4401) {
+          // Ons token is verlopen. Vernieuwen en direct opnieuw verbinden; de server stuurt via ?since= na wat we misten.
+          // Gebeurt dit steeds opnieuw (bijvoorbeeld door klokverschil), dan vallen we terug op de gewone wachttijd.
+          if (Date.now() - laatste4401 > 5000) {
+            laatste4401 = Date.now();
+            verbind();
+          } else {
+            planOpnieuw();
+          }
+          return;
+        }
         if (gebeurtenis.code === 1008) {
-          // De server weigert deze verbinding bewust; opnieuw proberen heeft geen zin.
+          // De server weigert ons bewust. Opnieuw proberen met hetzelfde token heeft geen zin.
           zetVerbinding('verbroken', 'Verbinding geweigerd: ' + (gebeurtenis.reason || 'niet toegestaan'));
+          $('herlogin').hidden = false;
           return;
         }
         planOpnieuw();
       });
-      socket.addEventListener('error', () => { /* 'close' volgt altijd; daar handelen we het af */ });
+      dezeSocket.addEventListener('error', () => { /* 'close' volgt altijd; daar handelen we het af */ });
     }
 
     function planOpnieuw() {
@@ -659,11 +865,7 @@
       const timer = setTimeout(() => afbreker.abort(), API_TIMEOUT_MS);
 
       try {
-        const antwoord = await fetch(API_BASIS + encodeURIComponent(melding.werkorderId), {
-          headers: { Accept: 'application/json' },
-          cache: 'no-store',
-          signal: afbreker.signal
-        });
+        const antwoord = await apiFetch(API_BASIS + encodeURIComponent(melding.werkorderId), afbreker.signal);
 
         let inhoud = null;
         try { inhoud = await antwoord.json(); } catch (fout) { /* geen JSON */ }
@@ -678,10 +880,16 @@
         }
       } catch (fout) {
         if (nummer !== toestand.verzoekNummer) return;
-        const tekst = fout.name === 'AbortError'
-          ? 'De server antwoordt niet op tijd.'
-          : 'De werkorder kon niet worden opgehaald. Controleer je verbinding.';
-        toestand.detail = { fase: 'fout', melding, tekst };
+        if (fout.herlogin) {
+          toestand.detail = { fase: 'fout', melding, status: 401, tekst: 'Je sessie is verlopen. Log opnieuw in.' };
+        } else if (fout.onbereikbaar) {
+          toestand.detail = { fase: 'fout', melding, tekst: fout.message };
+        } else {
+          const tekst = fout.name === 'AbortError'
+            ? 'De server antwoordt niet op tijd.'
+            : 'De werkorder kon niet worden opgehaald. Controleer je verbinding.';
+          toestand.detail = { fase: 'fout', melding, tekst };
+        }
       } finally {
         clearTimeout(timer);
       }
@@ -717,14 +925,18 @@
 
       if (fase === 'fout') {
         const status = toestand.detail.status;
-        const kop = status === 404 ? 'Werkorder niet gevonden' : 'Ophalen mislukt';
+        const kop = status === 404 ? 'Werkorder niet gevonden'
+          : status === 403 ? 'Geen toegang'
+          : status === 401 ? 'Niet ingelogd'
+          : 'Ophalen mislukt';
+        // Bij "geen toegang" heeft opnieuw proberen geen zin; bij een verlopen sessie is opnieuw inloggen de oplossing.
+        const actie = status === 403 ? null
+          : status === 401
+            ? el('button', { type: 'button', class: 'knop', onclick: opnieuwInloggen }, 'Opnieuw inloggen')
+            : el('button', { type: 'button', class: 'knop', onclick: () => haalWerkorderOp(melding) }, 'Opnieuw proberen');
         houder.append(el('div', { class: 'fout', role: 'alert' },
           el('p', {}, el('strong', { text: kop }), ' – ', toestand.detail.tekst),
-          el('div', {},
-            el('button', { type: 'button', class: 'knop', onclick: () => haalWerkorderOp(melding) }, 'Opnieuw proberen'),
-            ' ',
-            terugKnop()
-          )
+          el('div', {}, actie, actie ? ' ' : null, terugKnop())
         ));
         return;
       }
@@ -808,69 +1020,76 @@
     // ----------------------------------------------------------------
     // Start
     // ----------------------------------------------------------------
-    function toonKeuze() {
-      document.getElementById('hoofd').hidden = true;
-      document.getElementById('verbinding').hidden = true;
+    function toonScherm(titel, tekst, knop) {
+      $('hoofd').hidden = true;
+      $('verbinding').hidden = true;
+      $('gebruiker').hidden = true;
+      $('herlogin').hidden = true;
 
-      const houder = document.getElementById('keuze');
+      const houder = $('keuze');
       houder.hidden = false;
       leegMaken(houder);
-
-      const kies = (id) => { location.search = '?monteur=' + encodeURIComponent(id); };
-
-      const invoer = el('input', {
-        type: 'text',
-        id: 'monteur-invoer',
-        placeholder: 'bijvoorbeeld M-017',
-        autocomplete: 'off',
-        'aria-describedby': 'monteur-fout'
-      });
-      const fout = el('p', { id: 'monteur-fout', class: 'keuze-fout', role: 'alert' });
-
-      const formulier = el('form', {
-        onsubmit: (gebeurtenis) => {
-          gebeurtenis.preventDefault();
-          const waarde = invoer.value.trim().toUpperCase();
-          if (!MONTEUR_PATROON.test(waarde)) {
-            fout.textContent = 'Een monteur-id is "M-" gevolgd door cijfers, bijvoorbeeld M-017.';
-            return;
-          }
-          kies(waarde);
-        }
-      },
-        el('label', { for: 'monteur-invoer', text: 'Of vul een monteur-id in' }),
-        invoer,
-        el('button', { type: 'submit', class: 'knop', text: 'Doorgaan' }),
-        fout
-      );
-
       houder.append(el('section', { class: 'paneel' },
-        el('h2', { text: 'Wie ben je?' }),
+        el('h2', { text: titel }),
         el('div', { class: 'keuze-inhoud' },
-          el('p', { class: 'uitleg', text: 'Demo-inlog: er is nog geen echte authenticatie.' }),
-          el('div', { class: 'keuze-knoppen' },
-            DEMO_MONTEURS.map((m) => el('button', {
-              type: 'button',
-              class: 'knop',
-              onclick: () => kies(m.id)
-            }, `${m.naam} (${m.id})`))
-          ),
-          formulier
+          el('p', { class: 'uitleg', text: tekst }),
+          knop ? el('button', { type: 'button', class: 'knop', onclick: knop.actie, text: knop.tekst }) : null
         )
       ));
     }
 
-    if (monteurId) {
-      const gebruiker = document.getElementById('gebruiker');
+    function opnieuwInloggen() {
+      location.assign(REDIRECT_URI); // zonder sessie stuurt de start ons naar Keycloak
+    }
+
+    function startApp() {
+      $('keuze').hidden = true;
+      $('hoofd').hidden = false;
+      $('verbinding').hidden = false;
+
+      const gebruiker = $('gebruiker');
       gebruiker.hidden = false;
-      gebruiker.append('Ingelogd als ' + monteurId + ' · ', el('a', { href: location.pathname, text: 'wissel' }));
+      leegMaken(gebruiker);
+      gebruiker.append(
+        `Ingelogd als ${sessie.naam} (${sessie.monteurId}) · `,
+        el('a', { href: '#', text: 'Uitloggen', onclick: (gebeurtenis) => { gebeurtenis.preventDefault(); uitloggen(); } })
+      );
+
       herstel();
       tekenLijst();
       tekenDetail();
       verbind();
-    } else {
-      toonKeuze();
     }
+
+    async function start() {
+      $('herlogin').addEventListener('click', opnieuwInloggen);
+      const params = new URLSearchParams(location.search);
+
+      try {
+        if (params.has('uitgelogd')) {
+          toonScherm('Uitgelogd',
+            'Je bent uitgelogd. De meldingen die op dit apparaat bewaard waren, zijn gewist.',
+            { tekst: 'Opnieuw inloggen', actie: opnieuwInloggen });
+          return;
+        }
+
+        if (params.has('code') || params.has('error')) {
+          toonScherm('Inloggen…', 'Even geduld, je wordt ingelogd.');
+          await verwerkTerugkeer(params);
+        } else {
+          toonScherm('Inloggen…', 'Je wordt doorgestuurd naar de inlogpagina.');
+          await startLogin();
+          return; // de browser gaat nu naar Keycloak
+        }
+      } catch (fout) {
+        toonScherm('Inloggen mislukt', fout.message, { tekst: 'Opnieuw proberen', actie: opnieuwInloggen });
+        return;
+      }
+
+      startApp();
+    }
+
+    start();
   </script>
 </body>
 </html>

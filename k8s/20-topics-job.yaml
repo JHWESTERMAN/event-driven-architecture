@@ -1,0 +1,39 @@
+# Maakt de topics aan (eenmalig, en veilig om opnieuw te draaien).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: redpanda-topics
+  namespace: werkorder
+  labels:
+    app: redpanda-topics
+    app.kubernetes.io/part-of: werkorder-eda
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        app: redpanda-topics
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: rpk
+          image: docker.redpanda.com/redpandadata/redpanda:v24.3.1   # zelfde versie als hierboven
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+              BROKER=redpanda-0.redpanda.werkorder.svc.cluster.local:9092
+              until rpk cluster info -X brokers=$BROKER >/dev/null 2>&1; do
+                echo "Wachten op Redpanda..."; sleep 3
+              done
+              for t in werkorder-notificaties werkorder-notificaties.dlq; do
+                rpk topic describe $t -X brokers=$BROKER >/dev/null 2>&1 \
+                  || rpk topic create $t -p 3 -r 1 -X brokers=$BROKER
+              done
+              rpk topic list -X brokers=$BROKER
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 512Mi

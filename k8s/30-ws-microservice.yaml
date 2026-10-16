@@ -1,0 +1,87 @@
+# Notificatieservice (WebSocket + Kafka-consumer).
+# Eén replica, bewust: het register van verbindingen en de inhaalbuffer leven in het geheugen van het proces.
+# Meer replica's vraagt om een gedeelde laag (zie README, "Van PoC naar productie").
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ws-microservice
+  namespace: werkorder
+  labels:
+    app: ws-microservice
+    app.kubernetes.io/part-of: werkorder-eda
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate            # nooit twee consumers tegelijk in dezelfde groep tijdens een uitrol
+  selector:
+    matchLabels:
+      app: ws-microservice
+  template:
+    metadata:
+      labels:
+        app: ws-microservice
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: ws-microservice
+          image: REGISTRY/ws-microservice:IMAGE_TAG
+          ports:
+            - name: ws
+              containerPort: 8080
+          env:
+            - name: KAFKA_BROKER
+              value: redpanda:9092
+            - name: KAFKA_TOPIC
+              value: werkorder-notificaties
+            - name: PORT
+              value: "8080"
+            - name: HEARTBEAT_MS
+              value: "30000"
+            - name: OIDC_ISSUER           # moet gelijk zijn aan KC_HOSTNAME + /realms/werkorders
+              value: http://localhost:8180/realms/werkorders
+            - name: OIDC_JWKS_URL         # intern adres, waar de service de publieke sleutels ophaalt
+              value: http://keycloak:8080/realms/werkorders/protocol/openid-connect/certs
+            - name: OIDC_AUDIENCE
+              value: werkorders-api
+          resources:
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              cpu: 300m
+              memory: 192Mi
+          # Een gewone HTTP-vraag aan een WebSocket-server geeft 426, dus we controleren alleen of de poort open is.
+          # Crasht de Kafka-consumer, dan stopt het proces (process.exit(1)) en herstart Kubernetes de pod.
+          readinessProbe:
+            tcpSocket:
+              port: 8080
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 8080
+            periodSeconds: 20
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ws-microservice
+  namespace: werkorder
+  labels:
+    app: ws-microservice
+    app.kubernetes.io/part-of: werkorder-eda
+spec:
+  selector:
+    app: ws-microservice
+  ports:
+    - name: ws
+      port: 8080
+      targetPort: 8080

@@ -1,0 +1,22 @@
+# OPTIONEEL: maakt de gateway bereikbaar via een openbaar IP-adres (Azure Load Balancer).
+# Dit kost extra (load balancer + IP-adres) en de app heeft nog GEEN authenticatie.
+# Daarom alleen toegankelijk vanaf jouw eigen IP-adres. Vervang JOUW_IP, zie de README.
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-gateway-publiek
+  namespace: werkorder
+  labels:
+    app: api-gateway
+    app.kubernetes.io/part-of: werkorder-eda
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Local          # behoud het echte IP-adres van de bezoeker
+  loadBalancerSourceRanges:
+    - JOUW_IP/32
+  selector:
+    app: api-gateway
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080

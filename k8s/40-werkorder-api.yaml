@@ -1,0 +1,76 @@
+# Synchrone Werkorder-API (REST).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: werkorder-api
+  namespace: werkorder
+  labels:
+    app: werkorder-api
+    app.kubernetes.io/part-of: werkorder-eda
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: werkorder-api
+  template:
+    metadata:
+      labels:
+        app: werkorder-api
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: werkorder-api
+          image: REGISTRY/werkorder-api:IMAGE_TAG
+          ports:
+            - name: http
+              containerPort: 8081
+          env:
+            - name: PORT
+              value: "8081"
+            - name: OIDC_ISSUER           # moet gelijk zijn aan KC_HOSTNAME + /realms/werkorders
+              value: http://localhost:8180/realms/werkorders
+            - name: OIDC_JWKS_URL         # intern adres, waar de service de publieke sleutels ophaalt
+              value: http://keycloak:8080/realms/werkorders/protocol/openid-connect/certs
+            - name: OIDC_AUDIENCE
+              value: werkorders-api
+          resources:
+            requests:
+              cpu: 25m
+              memory: 48Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8081
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8081
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: werkorder-api
+  namespace: werkorder
+  labels:
+    app: werkorder-api
+    app.kubernetes.io/part-of: werkorder-eda
+spec:
+  selector:
+    app: werkorder-api
+  ports:
+    - name: http
+      port: 8081
+      targetPort: 8081

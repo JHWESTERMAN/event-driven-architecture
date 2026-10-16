@@ -1,0 +1,97 @@
+{
+  "realm": "werkorders",
+  "displayName": "Werkorders",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "resetPasswordAllowed": false,
+  "loginWithEmailAllowed": false,
+  "duplicateEmailsAllowed": false,
+  "bruteForceProtected": true,
+  "accessTokenLifespan": 300,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 36000,
+  "internationalizationEnabled": true,
+  "supportedLocales": ["nl", "en"],
+  "defaultLocale": "nl",
+  "clients": [
+    {
+      "clientId": "monteur-app",
+      "name": "Monteur-app",
+      "description": "De webapp voor monteurs. Publieke client: inloggen met authorization code en PKCE, zonder geheim.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": ["http://localhost/*", "http://localhost:8080/*"],
+      "webOrigins": ["http://localhost", "http://localhost:8080"],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "+"
+      },
+      "protocolMappers": [
+        {
+          "name": "werkorders-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "werkorders-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "werkorders-test",
+      "name": "Testclient (alleen voor curl en demo's)",
+      "description": "Staat inloggen met gebruikersnaam en wachtwoord rechtstreeks toe, zodat je met curl een token kunt ophalen. Niet voor productie.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "protocolMappers": [
+        {
+          "name": "werkorders-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "werkorders-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "m-017",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "J.",
+      "lastName": "de Vries",
+      "email": "j.devries@example.com",
+      "credentials": [{ "type": "password", "value": "welkom017", "temporary": false }]
+    },
+    {
+      "username": "m-022",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "S.",
+      "lastName": "Jansen",
+      "email": "s.jansen@example.com",
+      "credentials": [{ "type": "password", "value": "welkom022", "temporary": false }]
+    }
+  ]
+}

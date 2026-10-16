@@ -11,9 +11,18 @@ info:
     `status` en `bericht`. Deze API levert het volledige detail op het moment dat
     de monteur het nodig heeft, zodat hij altijd de actuele toestand ziet.
 
+    **Authenticatie en autorisatie.** Elk verzoek onder `/api/` vereist een access token van Keycloak
+    (OpenID Connect) in de header `Authorization: Bearer <token>`. Het monteur-id komt uit het token
+    (de gebruikersnaam, bijvoorbeeld `m-017` voor monteur `M-017`), nooit uit de URL of de body.
+    Een geldig token is niet genoeg: een monteur ziet alleen zijn eigen werkorders. Een werkorder van
+    een ander geeft `403`, en de lijst bevat alleen de eigen werkorders.
+
 servers:
   - url: http://localhost
     description: Lokale API-gateway (nginx)
+
+security:
+  - bearerAuth: []
 
 tags:
   - name: Werkorders
@@ -27,7 +36,9 @@ paths:
       tags: [Werkorders]
       operationId: lijstWerkorders
       summary: Lijst met werkorders
-      description: Compacte lijst, optioneel gefilterd op status en beperkt in aantal.
+      description: |
+        Compacte lijst van **je eigen** werkorders, optioneel gefilterd op status en beperkt in aantal.
+        Werkorders van andere monteurs komen er nooit in voor, ook niet in `totaal`.
       parameters:
         - name: status
           in: query
@@ -60,13 +71,19 @@ paths:
                     omschrijving: Storing wissel 214, wisselmotor reageert niet
         '400':
           $ref: '#/components/responses/OngeldigVerzoek'
+        '401':
+          $ref: '#/components/responses/NietGeauthenticeerd'
+        '503':
+          $ref: '#/components/responses/TijdelijkNietBeschikbaar'
 
   /api/werkorders/{werkorderId}:
     get:
       tags: [Werkorders]
       operationId: haalWerkorderOp
       summary: Volledige werkorder ophalen
-      description: Geeft alle gegevens van één werkorder, inclusief taken en materiaal.
+      description: |
+        Geeft alle gegevens van één werkorder, inclusief taken en materiaal.
+        Alleen de monteur aan wie de werkorder is toegewezen, mag hem opvragen.
       parameters:
         - name: werkorderId
           in: path
@@ -90,14 +107,22 @@ paths:
                 $ref: '#/components/schemas/Werkorder'
         '400':
           $ref: '#/components/responses/OngeldigVerzoek'
+        '401':
+          $ref: '#/components/responses/NietGeauthenticeerd'
+        '403':
+          $ref: '#/components/responses/GeenToegang'
         '404':
           $ref: '#/components/responses/NietGevonden'
+        '503':
+          $ref: '#/components/responses/TijdelijkNietBeschikbaar'
 
   /health:
     get:
       tags: [Beheer]
       operationId: gezondheid
       summary: Gezondheidscontrole
+      description: Zonder token bereikbaar, zodat Docker en Kubernetes de service kunnen controleren.
+      security: []
       responses:
         '200':
           description: De service draait.
@@ -112,7 +137,59 @@ paths:
                     enum: [UP]
 
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Access token van Keycloak (realm `werkorders`). Het token moet RS256 zijn ondertekend, de juiste
+        uitgever (`iss`) hebben, bedoeld zijn voor `werkorders-api` (`aud`) en niet verlopen zijn. De
+        gebruikersnaam (`preferred_username`) is het monteur-id in kleine letters.
+
   responses:
+    NietGeauthenticeerd:
+      description: Het token ontbreekt, is ongeldig of is verlopen. De precieze reden staat alleen in de log van de server.
+      headers:
+        WWW-Authenticate:
+          description: Het verwachte schema, bijvoorbeeld `Bearer realm="werkorders", error="invalid_token"`.
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Probleem'
+          example:
+            status: 401
+            title: Unauthorized
+            detail: Het token is ongeldig of verlopen
+    GeenToegang:
+      description: Het token is geldig, maar de werkorder hoort bij een andere monteur.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Probleem'
+          example:
+            status: 403
+            title: Forbidden
+            detail: Je hebt geen toegang tot werkorder WO-1003
+    TijdelijkNietBeschikbaar:
+      description: |
+        De API kan het token op dit moment niet controleren, omdat de identity provider niet bereikbaar is.
+        Probeer het later opnieuw.
+      headers:
+        Retry-After:
+          description: Aantal seconden om te wachten.
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Probleem'
+          example:
+            status: 503
+            title: Service Unavailable
+            detail: Inloggen is tijdelijk niet beschikbaar, probeer het zo opnieuw
     OngeldigVerzoek:
       description: Het verzoek is ongeldig (bijvoorbeeld een verkeerde status of een ongeldig id).
       content:

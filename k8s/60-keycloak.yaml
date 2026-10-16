@@ -1,0 +1,104 @@
+# Keycloak (identity provider, OpenID Connect) in ontwikkelmodus (start-dev).
+# Geschikt voor een PoC, niet voor productie: de gegevens leven in de pod en zijn weg na een herstart
+# (het realm-bestand wordt dan opnieuw ingelezen, dus de demo-monteurs zijn er meteen weer).
+#
+# KC_HOSTNAME is het adres waarmee de BROWSER bij Keycloak komt. Standaard is dat een port-forward naar poort 8180
+# op je eigen computer. Voor een andere omgeving: pas KC_HOSTNAME aan en zet dezelfde waarde in OIDC_ISSUER
+# van de services (30 en 40) en in OIDC_ISSUER van de app (gateway/html/monteur-app.html).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+  namespace: werkorder
+  labels:
+    app: keycloak
+    app.kubernetes.io/part-of: werkorder-eda
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: keycloak
+  template:
+    metadata:
+      labels:
+        app: keycloak
+      annotations:
+        checksum/realm: REALM_HASH          # nieuwe pod als het realm-bestand verandert
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: keycloak
+          image: quay.io/keycloak/keycloak:26.0.7
+          args: ["start-dev", "--import-realm"]
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: KC_BOOTSTRAP_ADMIN_USERNAME
+              value: admin
+            - name: KC_BOOTSTRAP_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-admin       # aangemaakt door deploy.sh met een willekeurig wachtwoord
+                  key: password
+            - name: KC_HOSTNAME
+              value: http://localhost:8180
+            - name: JAVA_OPTS_KC_HEAP
+              value: "-Xms64m -Xmx512m"
+          resources:
+            requests:
+              cpu: 250m
+              memory: 640Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi                    # opstarten (start-dev bouwt eerst) heeft een piek nodig
+          startupProbe:                      # Keycloak doet er een minuut of langer over
+            tcpSocket:
+              port: 8080
+            periodSeconds: 5
+            failureThreshold: 72             # tot 6 minuten
+          readinessProbe:
+            tcpSocket:
+              port: 8080
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 8080
+            periodSeconds: 30
+            failureThreshold: 6
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: realm
+              mountPath: /opt/keycloak/data/import
+              readOnly: true
+      volumes:
+        - name: realm
+          configMap:
+            name: keycloak-realm              # aangemaakt door deploy.sh uit keycloak/werkorders-realm.json
+---
+# Alleen binnen het cluster: de services halen hier hun sleutels op (keycloak:8080).
+# Voor de browser gebruik je kubectl port-forward (zie README).
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  namespace: werkorder
+  labels:
+    app: keycloak
+    app.kubernetes.io/part-of: werkorder-eda
+spec:
+  selector:
+    app: keycloak
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080

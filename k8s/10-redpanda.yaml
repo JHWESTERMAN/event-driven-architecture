@@ -1,0 +1,99 @@
+# Redpanda (Kafka-compatibele broker), één node met een eigen schijf.
+# Geheugen: Redpanda krijgt 1 GB voor zichzelf (--memory) en een limiet van 1,5 GiB voor het hele proces.
+apiVersion: v1
+kind: Service
+metadata:
+  name: redpanda
+  namespace: werkorder
+  labels:
+    app: redpanda
+    app.kubernetes.io/part-of: werkorder-eda
+spec:
+  clusterIP: None            # headless: elke pod krijgt een eigen DNS-naam (redpanda-0.redpanda)
+  selector:
+    app: redpanda
+  ports:
+    - name: kafka
+      port: 9092
+      targetPort: 9092
+    - name: admin
+      port: 9644
+      targetPort: 9644
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redpanda
+  namespace: werkorder
+  labels:
+    app: redpanda
+    app.kubernetes.io/part-of: werkorder-eda
+spec:
+  serviceName: redpanda
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redpanda
+  template:
+    metadata:
+      labels:
+        app: redpanda
+    spec:
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        fsGroup: 101           # de redpanda-gebruiker mag naar de schijf schrijven
+      containers:
+        - name: redpanda
+          # Gebruik dezelfde versie als in je docker-compose.yml:
+          #   grep redpandadata docker-compose.yml
+          image: docker.redpanda.com/redpandadata/redpanda:v24.3.1
+          args:
+            - redpanda
+            - start
+            - --mode=dev-container          # geen productie-controles, geschikt voor een PoC
+            - --smp=1
+            - --memory=1G
+            - --reserve-memory=0M
+            - --check=false
+            - --node-id=0
+            - --kafka-addr=0.0.0.0:9092
+            - --advertise-kafka-addr=redpanda-0.redpanda.werkorder.svc.cluster.local:9092
+            - --rpc-addr=0.0.0.0:33145
+            - --advertise-rpc-addr=redpanda-0.redpanda.werkorder.svc.cluster.local:33145
+          ports:
+            - name: kafka
+              containerPort: 9092
+            - name: admin
+              containerPort: 9644
+          resources:
+            requests:
+              cpu: 250m
+              memory: 1Gi
+            limits:
+              cpu: "1"
+              memory: 1536Mi
+          startupProbe:                     # Redpanda heeft even nodig om op te starten
+            tcpSocket:
+              port: 9092
+            periodSeconds: 5
+            failureThreshold: 36            # tot 3 minuten
+          readinessProbe:
+            tcpSocket:
+              port: 9092
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 9092
+            periodSeconds: 20
+            failureThreshold: 6
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/redpanda/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi                   # standaard opslagklasse van het cluster

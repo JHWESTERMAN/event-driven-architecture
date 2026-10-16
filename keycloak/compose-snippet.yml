@@ -1,0 +1,17 @@
+# Voeg dit toe aan je docker-compose.yml, onder "services:" (zelfde inspringing als de andere services).
+# Keycloak draait hier in ontwikkelmodus (start-dev): geschikt voor een PoC, niet voor productie.
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0.7
+    container_name: keycloak
+    restart: unless-stopped
+    command: start-dev --import-realm
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin          # alleen lokaal; het beheerscherm is niet van buiten bereikbaar
+      KC_HOSTNAME: http://localhost:8180          # de URL waarmee de BROWSER bij Keycloak komt (= "iss" in de tokens)
+      JAVA_OPTS_KC_HEAP: "-Xms64m -Xmx512m"       # houdt het geheugengebruik laag
+    volumes:
+      - ./keycloak/werkorders-realm.json:/opt/keycloak/data/import/werkorders-realm.json:ro
+    ports:
+      - "127.0.0.1:8180:8080"                      # alleen bereikbaar vanaf deze computer
+    mem_limit: 1g

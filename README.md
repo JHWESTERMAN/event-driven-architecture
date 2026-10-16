@@ -6,6 +6,9 @@ Een lokale proof-of-concept van een event-driven architectuur met twee kanten:
    als melding doorstuurt naar de juiste monteur via WebSocket.
 2. **Synchroon:** de monteur opent een melding en haalt via een REST-API de volledige werkorder op.
 
+Beide kanten zijn beveiligd met **OpenID Connect (Keycloak)**: de monteur logt in, en zowel de WebSocket als de API
+controleren het token en laten een monteur alleen zijn eigen meldingen en werkorders zien.
+
 Dit is het patroon *event notification + ophalen* (dun event, synchroon detail). Het project laat verder zien hoe je in
 een event-driven omgeving omgaat met contracten, validatie, gerichte levering en foutafhandeling (poison messages,
 dead letter topic).
@@ -34,14 +37,18 @@ dead letter topic).
 | **redpanda-init** | Eenmalige container die de topics aanmaakt (idempotent) |
 | **ws-microservice** | Consumer + validatie + WebSocket-server met gerichte levering per monteur + producer voor de dead letter topic |
 | **werkorder-api** | Synchrone REST-API die de volledige werkorder levert, beschreven in OpenAPI |
+| **keycloak** | Identity provider (OpenID Connect): inloggen, uitgifte van tokens, publieke sleutels om ze te controleren |
 | **api-gateway** | nginx: serveert de monteur-app, proxyt `/ws` naar de microservice en `/api/` naar de werkorder-API |
-| **monteur-app** | Webpagina (`gateway/html/monteur-app.html`): meldingen ontvangen en werkorder bekijken |
+| **monteur-app** | Webpagina (`gateway/html/monteur-app.html`): inloggen, meldingen ontvangen en werkorder bekijken |
 
 ## Projectstructuur
 
 ```
 event-driven-architecture/
-├── docker-compose.yml          # Redpanda, init-container, microservice, werkorder-api, gateway
+├── docker-compose.yml          # Redpanda, init-container, Keycloak, microservice, werkorder-api, gateway
+├── keycloak/
+│   ├── werkorders-realm.json   # realm, clients en demo-gebruikers (wordt bij de start ingelezen)
+│   └── compose-snippet.yml     # het keycloak-service-blok voor docker-compose.yml
 ├── gateway/
 │   ├── nginx.conf              # twee upstreams, WebSocket-proxy, API-proxy, rate limiting
 │   └── html/
@@ -49,18 +56,27 @@ event-driven-architecture/
 ├── microservice/               # notificatieservice
 │   ├── Dockerfile
 │   ├── package.json
-│   └── server.js               # consumer, validatie, gerichte levering, heartbeat, dead letter topic
+│   └── server.js               # tokencontrole, consumer, validatie, gerichte levering, heartbeat, dead letter topic
 ├── werkorder-api/              # synchrone API
 │   ├── Dockerfile
 │   ├── package.json
-│   ├── server.js               # REST-endpoints (alleen Node.js-standaardbibliotheek)
+│   ├── server.js               # REST-endpoints met tokencontrole en eigenaarscheck (alleen Node.js-standaardbibliotheek)
 │   └── openapi.yaml            # het contract van de API
+├── k8s/                        # Kubernetes-manifests voor AKS
+│   ├── 00-namespace.yaml ... 60-keycloak.yaml
+│   ├── gateway/nginx.conf      # nginx-configuratie voor in het cluster
+│   ├── optioneel-publiek.yaml  # optioneel: openbaar IP-adres, beperkt tot jouw IP
+│   └── deploy.sh               # bouwt de images in ACR en zet alles in het cluster
 └── README.md
 ```
 
 ## Snel starten
 
 Vereist: Docker Desktop (met `docker compose`). Node.js is lokaal alleen nodig voor `wscat`.
+
+**Eenmalig:** voeg het Keycloak-blok toe aan `docker-compose.yml`. Plak de inhoud van
+[`keycloak/compose-snippet.yml`](keycloak/compose-snippet.yml) onder `services:` (let op de inspringing: `keycloak:` staat op
+dezelfde hoogte als `redpanda:`). Een Mac met 8 GB heeft hier ruimte voor: Keycloak is begrensd op 1 GB.
 
 ```bash
 # bouwen en starten
@@ -74,8 +90,18 @@ docker compose logs ws-microservice --tail 20
 docker compose logs werkorder-api --tail 20
 ```
 
-Open daarna **http://localhost/**. Zonder monteur in de adresbalk toont de app een keuzescherm.
-Open de app als monteur via **http://localhost/?monteur=M-017**. De status rechtsboven moet groen worden ("Verbonden").
+Keycloak heeft 30 tot 60 seconden nodig om te starten (de eerste keer langer). Volg het met
+`docker compose logs keycloak --tail 5`; klaar is het bij een regel met `Listening on: http://0.0.0.0:8080`.
+
+Open daarna **http://localhost/**. De app stuurt je naar Keycloak. Log in met een van de demo-monteurs:
+
+| Gebruiker | Wachtwoord | Wordt in de app |
+|---|---|---|
+| `m-017` | `welkom017` | monteur **M-017** (J. de Vries) |
+| `m-022` | `welkom022` | monteur **M-022** (S. Jansen) |
+
+De status rechtsboven moet groen worden ("Verbonden"). De beheerconsole van Keycloak staat op http://localhost:8180
+(gebruiker `admin`, wachtwoord `admin`; alleen bereikbaar vanaf je eigen computer).
 
 In de logs van de microservice zie je onder andere:
 
@@ -88,11 +114,9 @@ Luisteren naar Kafka topic: 'werkorder-notificaties' (dead letter topic: 'werkor
 
 ### De hele keten, in de browser (twee monteurs)
 
-1. Open twee browservensters naast elkaar:
-   - http://localhost/?monteur=M-017
-   - http://localhost/?monteur=M-022
-
-   Wacht tot beide "Verbonden" tonen.
+1. Open twee **verschillende** browsers, of één gewoon venster en één privévenster (inloggen is per browser: dezelfde
+   browser blijft ingelogd als dezelfde gebruiker). Open `http://localhost/` en log in als `m-017` in de ene en als
+   `m-022` in de andere. Wacht tot beide "Verbonden" tonen.
 2. Stuur meldingen. Elk bericht bevat het `monteurId` van de monteur voor wie het bedoeld is:
 
    ```bash
@@ -126,15 +150,39 @@ Aanvullende scenario's:
 | Werkorder bestaat niet | `{"werkorderId":"WO-9999","monteurId":"M-017","status":"OPEN","bericht":"Test"}` | melding komt aan, detail toont "Werkorder niet gevonden" |
 | Status in melding wijkt af van de API | `WO-1002` met `"status":"AFGEROND"` | waarschuwing: de app toont de actuele status uit de API |
 | Monteur is offline | bericht voor `M-099`, terwijl niemand als M-099 verbonden is | niemand ontvangt het nu, de service logt `Monteur M-099 is niet verbonden: melding bewaard voor inhalen` |
-| Inhalen na offline | sluit het venster van M-017, stuur 2 berichten voor M-017, open `http://localhost/?monteur=M-017` opnieuw | de 2 berichten verschijnen alsnog, gemarkeerd met "ingehaald", zonder dubbelen |
-| Nieuw apparaat | open M-017 in een privévenster (lege opslag) | de bewaarde meldingen van M-017 komen binnen als "ingehaald" |
-| Zelfde monteur, twee vensters | open M-017 in twee vensters | beide vensters ontvangen de melding |
+| Inhalen na offline | sluit het venster van M-017, stuur 2 berichten voor M-017, open `http://localhost/` opnieuw | de 2 berichten verschijnen alsnog, gemarkeerd met "ingehaald", zonder dubbelen |
+| Nieuw apparaat | log in als M-017 in een privévenster (lege opslag) | de bewaarde meldingen van M-017 komen binnen als "ingehaald" |
+| Zelfde monteur, twee vensters | log in als M-017 in twee vensters | beide vensters ontvangen de melding |
+| Uitloggen | klik op "Uitloggen" | je komt terug op het inlogscherm van Keycloak, en de lokaal bewaarde meldingen van die monteur zijn gewist |
+| Token verloopt | wacht ruim 5 minuten (levensduur van het token) | de app ververst het token zelf en verbindt opnieuw; je merkt er niets van, en er gaat geen melding verloren |
 | WebSocket valt weg | `docker compose stop ws-microservice` | status wordt rood met aftelling, herstelt na `docker compose start ws-microservice` |
+
+### Een token ophalen voor de testen op de command line
+
+Voor `curl` en `wscat` heb je zelf een token nodig. Daarvoor is in het realm een aparte testclient (`werkorders-test`)
+met de *password grant* ingesteld. Dat is alleen voor deze demo: die flow is verouderd en hoort in productie uit.
+
+```bash
+token() {   # gebruik: token m-017 welkom017
+  curl -s -d client_id=werkorders-test -d grant_type=password -d "username=$1" -d "password=$2" \
+    http://localhost:8180/realms/werkorders/protocol/openid-connect/token \
+    | python3 -c 'import sys,json; print(json.load(sys.stdin)["access_token"])'
+}
+T17=$(token m-017 welkom017)
+T22=$(token m-022 welkom022)
+```
+
+Een token is 5 minuten geldig. Haal er daarna een nieuw op. Hij is te inspecteren met
+`echo $T17 | cut -d. -f2 | base64 -d 2>/dev/null` (let op: dit is gewoon leesbare JSON, geen geheim voor de drager).
 
 ### Alleen de WebSocket
 
+De monteur komt uit het token, niet uit de URL. Het eerste bericht na het verbinden moet het token bevatten:
+
 ```bash
-npx wscat -c "ws://localhost/ws?monteurId=M-017"
+npx wscat -c "ws://localhost/ws"
+# typ daarna (met je eigen token erin):
+{"type":"AUTH","token":"<plak T17 hier>"}
 ```
 
 Je krijgt eerst een SYSTEM-bericht: `Verbonden met het Werkorder Notificatiesysteem als M-017`.
@@ -142,26 +190,34 @@ Je krijgt eerst een SYSTEM-bericht: `Verbonden met het Werkorder Notificatiesyst
 Gemiste meldingen opvragen kan met `since` (een ISO 8601-tijdstip in UTC). Alles wat de service bewaard heeft:
 
 ```bash
-npx wscat -c "ws://localhost/ws?monteurId=M-017&since=1970-01-01T00:00:00.000Z"
+npx wscat -c "ws://localhost/ws?since=1970-01-01T00:00:00.000Z"
 ```
 
-Zonder geldig `monteurId` weigert de server de verbinding:
+Wat de server weigert, sluit hij met een code. De reden staat bewust niet in het antwoord, maar in de log van de service:
 
-```bash
-npx wscat -c ws://localhost/ws
-# Disconnected (code: 1008, reason: "monteurId ontbreekt of is ongeldig")
-```
+| Je doet | Resultaat |
+|---|---|
+| geen AUTH-bericht binnen 5 seconden | sluiting met code `1008` |
+| een ander eerste bericht dan AUTH, of een ongeldig/verlopen/vervalst token | sluiting met code `1008` |
+| Keycloak is op dat moment niet bereikbaar en de sleutels zijn nog niet bekend | sluiting met code `1013` (probeer later opnieuw) |
+| het token verloopt terwijl je verbonden bent | sluiting met code `4401`; de app ververst en verbindt opnieuw |
 
 ### Alleen de API
 
-De API is niet rechtstreeks bereikbaar vanaf de host, alleen via de gateway:
+De API is niet rechtstreeks bereikbaar vanaf de host, alleen via de gateway. Elk verzoek onder `/api/` heeft een token nodig:
 
 ```bash
-curl -i http://localhost/api/werkorders/WO-1002        # 200, volledige werkorder
-curl -i http://localhost/api/werkorders/WO-9999        # 404, bestaat niet
-curl -i http://localhost/api/werkorders/abc            # 400, ongeldig id
-curl -i "http://localhost/api/werkorders?status=OPEN"  # 200, gefilterde lijst
+curl -i http://localhost/api/werkorders/WO-1002                                    # 401, geen token
+curl -i -H "Authorization: Bearer $T17" http://localhost/api/werkorders/WO-1002    # 200, eigen werkorder
+curl -i -H "Authorization: Bearer $T17" http://localhost/api/werkorders/WO-1003    # 403, werkorder van M-022
+curl -i -H "Authorization: Bearer $T17" http://localhost/api/werkorders/WO-9999    # 404, bestaat niet
+curl -i -H "Authorization: Bearer $T17" http://localhost/api/werkorders/abc        # 400, ongeldig id
+curl -i -H "Authorization: Bearer $T17" "http://localhost/api/werkorders?status=OPEN"  # alleen jouw werkorders
+curl -i http://localhost/health                                                    # 200, zonder token
 ```
+
+De tweede en derde regel zijn de kern van de eigenaarscheck: dezelfde aanvrager, twee werkorders, en alleen die van
+hemzelf komt terug. Met `$T22` is het precies andersom.
 
 ### Ongeldige berichten en de dead letter topic
 
@@ -218,12 +274,13 @@ en voor wie, niet wat de hele werkorder bevat.
 
 | Onderdeel | Beschrijving |
 |---|---|
-| Adres | `ws://<gateway>/ws?monteurId=M-017&since=2026-10-16T14:03:22.123Z` |
-| `monteurId` | verplicht, `M-` gevolgd door cijfers |
+| Adres | `ws://<gateway>/ws?since=2026-10-16T14:03:22.123Z` |
+| Eerste bericht | binnen 5 seconden `{"type":"AUTH","token":"<access token>"}`. Het token staat bewust niet in de URL, want URL's komen terecht in logs van proxies en gateways. |
+| Identiteit | de monteur komt uitsluitend uit het token (`M-017`), nooit uit de URL of een bericht van de client |
 | `since` | optioneel, ISO 8601 in UTC (zoals `Date.toISOString()`). Zonder `since` komt er geen inhaal. Met `since` stuurt de server de bewaarde meldingen vanaf (en inclusief) dat tijdstip na. |
-| Welkomstbericht | `{"type":"SYSTEM","message":"Verbonden ... als M-017"}` |
+| Welkomstbericht | `{"type":"SYSTEM","message":"Verbonden ... als M-017"}`, pas nadat het token is geaccepteerd |
 | Meldingen | de vier velden van het event, plus `eventId` (partitie en offset, bijvoorbeeld `0-42`) en `tijdstip` (ISO 8601, het moment waarop Kafka het bericht ontving). Ingehaalde meldingen hebben bovendien `"inhaal": true`. Extra velden van de producer worden niet doorgestuurd. |
-| Weigering | ontbrekend of ongeldig `monteurId`, of een ongeldig `since`: de server sluit de verbinding met code `1008` en een reden |
+| Sluitcodes | `1008` geen of ongeldig token, of een ongeldig `since` (reden alleen in de serverlog); `1013` Keycloak onbereikbaar, probeer later; `4401` token verlopen, ververs en verbind opnieuw; `1009` bericht te groot (maximaal 16 KiB) |
 
 De nieuwe velden `eventId`, `tijdstip` en `inhaal` zijn een toevoeging aan het contract en breken bestaande clients niet.
 
@@ -233,9 +290,14 @@ Het contract staat in [`werkorder-api/openapi.yaml`](werkorder-api/openapi.yaml)
 
 | Verzoek | Resultaat |
 |---|---|
-| `GET /api/werkorders/{werkorderId}` | 200 met de volledige werkorder, 400 bij ongeldig id, 404 als hij niet bestaat |
-| `GET /api/werkorders?status=OPEN&limit=10` | 200 met een compacte lijst, 400 bij een ongeldige status of limiet |
-| `GET /health` | 200 `{"status":"UP"}` |
+| `GET /api/werkorders/{werkorderId}` | 200 met de volledige werkorder, 400 bij ongeldig id, 404 als hij niet bestaat, **403 als hij bij een andere monteur hoort** |
+| `GET /api/werkorders?status=OPEN&limit=10` | 200 met een compacte lijst van **jouw** werkorders, 400 bij een ongeldige status of limiet |
+| `GET /health` | 200 `{"status":"UP"}`, zonder token |
+
+Alles onder `/api/` vereist `Authorization: Bearer <access token>`. Zonder of met een ongeldig token volgt `401` (met een
+`WWW-Authenticate`-header); is Keycloak niet bereikbaar en kan het token niet worden gecontroleerd, dan volgt `503` met
+`Retry-After`. Het onderscheid is bewust: "je bent niet ingelogd" en "ik kan het nu niet nagaan" vragen een
+andere reactie van de client.
 
 Alle fouten hebben dezelfde structuur (in de stijl van RFC 7807): `{"status":404,"title":"Not Found","detail":"..."}`.
 De volledige werkorder bevat onder andere locatie, monteur, `taken[]` en `materiaal[]` (kardinaliteit 0..*; een lege lijst
@@ -256,8 +318,8 @@ Open daarna http://localhost:8082.
 `gateway/html/monteur-app.html` is één bestand met gewone JavaScript, zonder framework of buildstap. Het wordt door
 nginx geserveerd en praat via dezelfde gateway met de WebSocket en de API (dezelfde herkomst, dus geen CORS nodig).
 
-- **Identificatie:** de monteur staat in de adresbalk (`?monteur=M-017`). Zonder monteur toont de app een keuzescherm
-  (demo-inlog). De link "wissel" in de kop brengt je daar terug. Dit is identificatie, geen authenticatie.
+- **Inloggen:** de app stuurt je naar Keycloak (zie "Authenticatie en autorisatie") en weet na terugkeer wie je bent uit
+  het token. Er is geen keuzescherm meer en `?monteur=` heeft geen effect. De knop "Uitloggen" beëindigt ook de sessie bij Keycloak.
 - **Meldingen:** alleen die voor deze monteur, nieuwste bovenaan (op het tijdstip van de melding), maximaal 50, met een
   stip voor ongelezen meldingen. Ingehaalde meldingen staan op de juiste plek en dragen de tekst "ingehaald".
 - **Detail:** locatie met kaartlink, monteur, taken als checklist met teller, materiaal als tabel, en het tijdstip waarop
@@ -266,23 +328,122 @@ nginx geserveerd en praat via dezelfde gateway met de WebSocket en de API (dezel
   bron van waarheid, de melding is een signaal.
 - **Verbinding:** automatisch herverbinden met oplopende wachttijd (1 tot 30 seconden) en een willekeurige vertraging,
   zodat niet alle monteurs na een herstart tegelijk terugkomen. Bij een weigering door de server (code 1008) probeert de
-  app het niet opnieuw.
+  app het niet opnieuw maar toont "Verbinding geweigerd" met een knop om opnieuw in te loggen. Een verlopen token (code
+  4401) ververst de app zelf en verbindt daarna opnieuw.
 - **Lokaal bewaren:** de meldingenlijst (maximaal 50, inclusief gelezen/ongelezen) wordt per monteur in `localStorage`
-  bewaard, zodat de lijst blijft staan na wisselen van monteur of herladen. Dit is een kopie in deze browser. Wat er
+  bewaard, zodat de lijst blijft staan na herladen. Uitloggen wist de lijst van die monteur, zodat de volgende gebruiker van
+  hetzelfde apparaat niets te zien krijgt. Dit is een kopie in deze browser. Wat er
   gebeurde terwijl de app dicht was, haalt de app in bij het verbinden (zie "Inhalen van gemiste meldingen").
 - **Inhalen:** bij elke verbinding stuurt de app `since` mee: het tijdstip van de nieuwste melding die hij heeft, of het
   begin der tijden als de lijst leeg is. Meldingen die hij al heeft, worden genegeerd (ontdubbeld op `eventId`).
-- **Foutafhandeling:** time-out na 8 seconden, aparte meldingen voor 404 en een onbereikbare server, en een verouderd
+- **Foutafhandeling:** time-out na 8 seconden, aparte meldingen voor 404 ("niet gevonden"), 403 ("geen toegang", zonder
+  knop om opnieuw te proberen), 401 (met "Opnieuw inloggen") en een onbereikbare server, en een verouderd
   antwoord wordt genegeerd als je intussen een andere melding kiest.
 - **Veilig:** alle data uit netwerk en API wordt als tekst getoond (`textContent`), nooit als HTML.
 - **Mobiel en donker:** op een smal scherm tonen lijst en detail om beurten, en het kleurenschema volgt het apparaat.
+
+## Authenticatie en autorisatie
+
+Voorheen was het `monteurId` in de URL een claim zonder bewijs: iedereen kon zich als iedereen voordoen, en de API
+controleerde niet of een werkorder bij de aanvrager hoort. Dat is een klassieke kwetsbaarheid, *Broken Object Level
+Authorization* (BOLA/IDOR, nummer 1 in de OWASP API Security Top 10). Het gat zat niet bij het inloggen maar bij de
+controle op het object. Daarom zijn er nu twee losse stappen:
+
+- **Authenticatie, wie ben je?** Dit regelt Keycloak. De services vertrouwen een token alleen na controle van de handtekening.
+- **Autorisatie, mag je dit?** Dit regelt elke service zelf, per object: een geldig token voor M-017 geeft geen toegang tot
+  de werkorder van M-022.
+
+### De login (authorization code met PKCE)
+
+```
+ Browser (monteur-app)                         Keycloak                     Services
+        │  1. stuurt je naar Keycloak (code_challenge, state)  │
+        │ ───────────────────────────────────────────────────► │
+        │  2. jij logt in; Keycloak stuurt terug met een code  │
+        │ ◄─────────────────────────────────────────────────── │
+        │  3. code + code_verifier inwisselen voor tokens      │
+        │ ───────────────────────────────────────────────────► │
+        │ ◄──────────────── access token (5 min) ───────────── │
+        │  4. API: Authorization: Bearer <token> ──────────────────────────────►│ controleert zelf
+        │     WebSocket: eerste bericht {"type":"AUTH",...} ───────────────────►│ de handtekening
+```
+
+De app is een *public client*: een webpagina kan geen geheim bewaren. PKCE (S256) beschermt daarom de code die
+onderweg is. Het token staat alleen in het geheugen van de pagina, niet in `localStorage` en niet in de URL.
+
+### Wat de services controleren
+
+Beide services valideren het token zelf, zonder bij elk verzoek naar Keycloak te bellen. Ze halen eenmalig de publieke
+sleutels op (JWKS) en controleren daarmee de handtekening:
+
+| Controle | Waarom |
+|---|---|
+| algoritme is `RS256` | voorkomt het aanvalspatroon "alg: none" en het omdraaien naar een symmetrisch algoritme |
+| `kid` verwijst naar een bekende sleutel | alleen sleutels van deze Keycloak |
+| handtekening klopt | het token is niet aangepast |
+| `iss` is exact het verwachte adres | het token komt van deze Keycloak en dit realm |
+| `aud` bevat `werkorders-api` | het token is voor deze diensten bedoeld, niet voor een andere app |
+| `exp` en `nbf` (5 seconden speling) | niet verlopen en niet te vroeg |
+| `preferred_username` is `m-` + cijfers | daaruit komt het monteurId, in hoofdletters (`m-017` wordt `M-017`) |
+
+De sleutels staan 10 minuten in het geheugen. Kent de service een `kid` niet (Keycloak heeft de sleutel gewisseld), dan
+haalt hij ze opnieuw op, hooguit één keer per 30 seconden. Is Keycloak tijdelijk weg, dan blijven de bekende sleutels
+werken: een storing van de identity provider legt zo niet meteen alle ingelogde monteurs stil.
+
+### Autorisatie in de API
+
+- De lijst bevat alleen werkorders van de ingelogde monteur.
+- Het detail van een werkorder van een ander geeft `403`; een werkorder die niet bestaat geeft `404`. De logregel
+  vermeldt wie wat probeerde (`Toegang geweigerd: M-017 vroeg WO-1003 op (eigenaar: M-022)`), het antwoord noemt de eigenaar niet.
+- **Afweging:** doordat `404` en `403` verschillen, kan iemand nagaan welke id's bestaan (*enumeratie*). Hier is dat
+  acceptabel, omdat de id's toch in de meldingen staan. Bij gevoeliger gegevens antwoord je voor "niet van jou" ook
+  `404`, dan geef je niets prijs.
+- Antwoorden gaan met `Cache-Control: no-store`, zodat een gedeelde proxy of browsercache ze niet bewaart.
+
+### De inrichting in Keycloak
+
+Het realm `werkorders` wordt bij de start ingelezen uit [`keycloak/werkorders-realm.json`](keycloak/werkorders-realm.json):
+
+| Onderdeel | Waarde |
+|---|---|
+| Client `monteur-app` | public, alleen *authorization code flow* met PKCE, doorverwijzing alleen naar `http://localhost/*` en `http://localhost:8080/*` |
+| Client `werkorders-test` | alleen voor de demo (password grant), zie "Testen" |
+| Audience mapper | zet `werkorders-api` in `aud` van elk token |
+| Levensduur access token | 5 minuten |
+| SSO-sessie | 30 minuten inactief, 10 uur maximaal |
+| Gebruikers | `m-017` en `m-022` (wachtwoorden in de tabel bij "Snel starten") |
+
+Keycloak slaat gebruikersnamen in kleine letters op, vandaar `m-017`. De services zetten dat om naar `M-017`. Een extra
+attribuut met het monteurId zou netter zijn, maar vraagt in recente Keycloak-versies extra instelling van het gebruikersprofiel.
+Voor een PoC is `preferred_username` genoeg.
+
+> **Een wijziging in het realm-bestand werkt pas na het opnieuw aanmaken van Keycloak:**
+> `docker compose up -d --force-recreate keycloak`. De import slaat een bestaand realm over.
+
+### Het adres van Keycloak (`iss`)
+
+Dit is de lastigste kant van OIDC en de meest waarschijnlijke bron van problemen. Het token bevat het adres waarmee de
+**browser** bij Keycloak kwam (`http://localhost:8180/realms/werkorders`), en de services controleren exact dat adres.
+Maar de services zelf bereiken Keycloak intern als `http://keycloak:8080`. Daarom zijn er twee instellingen:
+
+| Variabele | Waarde | Betekenis |
+|---|---|---|
+| `OIDC_ISSUER` | `http://localhost:8180/realms/werkorders` | wat in `iss` moet staan (het publieke adres) |
+| `OIDC_JWKS_URL` | `http://keycloak:8080/realms/werkorders/protocol/openid-connect/certs` | waar de service de sleutels ophaalt (intern adres) |
+| `OIDC_AUDIENCE` | `werkorders-api` | wat in `aud` moet staan |
+
+Staan de standaardwaarden goed (ze staan zo in de services en in de manifests), dan hoef je niets in te stellen. In
+Kubernetes is `localhost:8180` hetzelfde adres via een tweede `port-forward` (zie hieronder). Voor een echt, openbaar adres
+heeft Keycloak een eigen hostnaam met TLS nodig en moeten `KC_HOSTNAME`, `OIDC_ISSUER` en de constante bovenin
+`monteur-app.html` samen worden aangepast.
 
 ## Gerichte levering en verbindingsbeheer
 
 De notificatieservice houdt een register bij van wie waar verbonden is (`monteurId` naar een verzameling verbindingen).
 Eén monteur kan meerdere verbindingen hebben, bijvoorbeeld telefoon en tablet.
 
-1. De client verbindt met `/ws?monteurId=M-017`. Een ontbrekend of ongeldig id wordt geweigerd (code 1008).
+1. De client verbindt met `/ws` en stuurt als eerste bericht zijn token. Zonder geldig token wordt de verbinding
+   gesloten (code 1008). Het `monteurId` komt uit het token.
 2. De consumer leest een event, valideert het en zoekt de verbindingen van `event.monteurId` op.
 3. De melding wordt eerst bewaard in de inhaalbuffer en gaat daarna alleen naar de verbindingen van die monteur. Is de
    monteur niet verbonden, dan wordt dat gelogd. De melding is dan niet kwijt: hij wordt nagestuurd zodra de monteur
@@ -373,7 +534,7 @@ maakt het anders aan. Daardoor geeft herhaald `docker compose up -d` geen foutme
 
 **nginx als gateway.** Er zijn twee upstreams: `websocket_backend` en `werkorder_backend`. Voor WebSocket zijn
 `proxy_http_version 1.1` en de headers `Upgrade` en `Connection` nodig, en `proxy_read_timeout` is hoog gezet zodat
-langlopende verbindingen niet worden afgebroken. De querystring (`?monteurId=...`) wordt doorgegeven aan de
+langlopende verbindingen niet worden afgebroken. De querystring (`?since=...`) wordt doorgegeven aan de
 microservice. Bij `location /api/` staat bewust geen `/` achter de naam van de upstream, zodat het volledige pad
 (`/api/werkorders/WO-1002`) ongewijzigd bij de API aankomt.
 
@@ -386,7 +547,7 @@ Dit project is een proof-of-concept. Bij duizenden monteurs komen er andere vrag
 
 | Onderwerp | Waarom het uitmaakt |
 |---|---|
-| **Authenticatie** | Het `monteurId` in de URL is nu alleen een claim: iedereen kan zich als iedereen voordoen, en de API controleert niet of een werkorder bij de aanvrager hoort. In productie: een token (bijvoorbeeld JWT) bij het verbinden en bij API-verzoeken, en een manier om verbindingen te sluiten als rechten veranderen. |
+| **Authenticatie** | Hier opgelost met Keycloak, tokens en een eigenaarscheck. Voor productie ontbreekt: TLS en een eigen hostnaam voor Keycloak, Keycloak met een echte database en meerdere instanties (nu `start-dev`), het verwijderen van de demo-gebruikers en de test-client met password grant, een sterk beheerwachtwoord, een koppeling van gebruikers aan het bronsysteem, en een manier om bestaande verbindingen te sluiten als rechten intrekken (nu pas bij verlopen van het token, maximaal 5 minuten). |
 | **Meerdere instanties** | In één consumer group krijgt één instantie elk bericht, dus een monteur die op een andere instantie verbonden is, mist het. Oplossingen: een eigen consumer group per instantie, een pub/sub-laag (Redis, NATS) of een beheerde dienst (Azure Web PubSub, SignalR). |
 | **Inhalen na offline** | Hier opgelost met een buffer in het geheugen en `?since=`. In productie moet die buffer gedeeld en duurzaam zijn (Redis, database of opnieuw lezen uit Kafka), en hoort er een volgnummer per monteur in plaats van een tijdstip. |
 | **Reconnect-storm** | Na een herstart of uitrol verbinden alle clients tegelijk opnieuw. Wachttijd met willekeurige vertraging (de app doet dit al) en gecontroleerd afbouwen van verbindingen bij het uitrollen helpen. |
@@ -398,6 +559,152 @@ Kafka is een backbone voor service-naar-service-verkeer. Je laat er geen duizend
 push gateway) die per gebruiker routeert, verbindingen beheert en berichten opvangt voor wie offline is. De
 `ws-microservice` is daar de eenvoudige eerste versie van.
 
+## Deployen op Kubernetes (Azure AKS)
+
+Dezelfde applicatie draait ook op Kubernetes. De manifests staan in `k8s/`. Ze zijn zo klein gehouden dat alles op
+**één node met 2 vCPU en 8 GiB** past (Standard_B2s_v2). Zie [Kosten](#kosten-en-opruimen) hieronder.
+
+> **Let op:** Keycloak draait hier in ontwikkelmodus (`start-dev`) en zonder TLS. Zet deze omgeving daarom niet openbaar
+> op internet. De standaardopzet is alleen bereikbaar via `kubectl port-forward` vanaf je eigen computer. Daar past het
+> inloggen goed bij: de browser gebruikt `http://localhost:8180` voor Keycloak, net als in Docker Compose.
+
+### Wat is anders dan in Docker Compose
+
+| Compose | Kubernetes |
+|---|---|
+| `services:` met `restart: unless-stopped` | `Deployment` (en `StatefulSet` voor Redpanda); Kubernetes herstart pods vanzelf |
+| `depends_on` | geen volgorde; `readinessProbe` houdt verkeer weg tot een pod klaar is, en de services proberen opnieuw te verbinden |
+| `redpanda-init`-container | een `Job` (`20-topics-job.yaml`) die de topics aanmaakt |
+| volume voor Redpanda | `volumeClaimTemplate`: een Azure-schijf die blijft bestaan als de pod herstart |
+| `ports:` en `expose:` | een `Service` per onderdeel; van buiten alleen via `port-forward` |
+| `nginx.conf` en HTML als gemounte bestanden | twee `ConfigMap`s, aangemaakt door `deploy.sh` |
+| Keycloak met `admin/admin` en het realm-bestand | een `Deployment` (`60-keycloak.yaml`); het realm in een `ConfigMap`, het beheerwachtwoord in een `Secret` dat `deploy.sh` willekeurig aanmaakt |
+| `build:` | de image wordt in Azure Container Registry (ACR) gebouwd en uit die registry gehaald |
+
+### Stap 1: voorbereiding
+
+```bash
+brew install azure-cli kubectl
+az login
+```
+
+Bij een nieuw Azure-account moeten sommige onderdelen eenmalig worden geactiveerd (duurt een paar minuten):
+
+```bash
+for p in Microsoft.ContainerService Microsoft.ContainerRegistry Microsoft.Compute Microsoft.Network Microsoft.Storage; do
+  az provider register --namespace $p
+done
+```
+
+### Stap 2: registry en cluster aanmaken
+
+```bash
+RG=rg-werkorder
+ACR=werkorder$RANDOM            # naam moet wereldwijd uniek zijn, alleen kleine letters en cijfers
+
+az group create --name $RG --location westeurope
+az acr create --resource-group $RG --name $ACR --sku Basic
+
+az aks create --resource-group $RG --name aks-werkorder \
+  --tier free --node-count 1 --node-vm-size Standard_B2s_v2 \
+  --node-osdisk-type Managed --node-osdisk-size 32 \
+  --attach-acr $ACR --generate-ssh-keys
+
+az aks get-credentials --resource-group $RG --name aks-werkorder
+kubectl get nodes                # de node hoort "Ready" te tonen
+echo $ACR                        # onthoud de naam
+```
+
+### Stap 3: deployen
+
+```bash
+./k8s/deploy.sh $ACR
+```
+
+Het script bouwt de twee images in de cloud, maakt de configuratie aan en start alles. Het eindigt met een overzicht
+van de pods; die horen allemaal `Running` te zijn (de topics-job staat op `Completed`).
+
+Bij het bouwen in ACR wordt de hele map `microservice/` en `werkorder-api/` geüpload. Heb je daar een `node_modules`-map
+staan, zet die dan in een `.dockerignore`, anders duurt het uploaden onnodig lang.
+
+### Stap 4: gebruiken
+
+Er zijn twee `port-forward`s nodig: één voor de app, één voor Keycloak (de browser moet daar rechtstreeks heen om in te loggen).
+Gebruik twee terminalvensters en laat ze draaien:
+
+```bash
+kubectl -n werkorder port-forward svc/api-gateway 8080:80
+kubectl -n werkorder port-forward svc/keycloak 8180:8080
+```
+
+Open `http://localhost:8080/` en log in als `m-017` (wachtwoord `welkom017`). Het beheerwachtwoord van Keycloak staat
+in een `Secret` en is willekeurig:
+
+```bash
+kubectl -n werkorder get secret keycloak-admin -o jsonpath='{.data.password}' | base64 -d; echo
+```
+
+Stuur berichten via de pod:
+
+```bash
+printf '%s\n' \
+'{"werkorderId":"WO-1001","monteurId":"M-017","status":"OPEN","bericht":"Nieuwe storing toegewezen"}' \
+| kubectl -n werkorder exec -i redpanda-0 -- rpk topic produce werkorder-notificaties -z none
+```
+
+Logs en status:
+
+```bash
+kubectl -n werkorder logs deploy/ws-microservice --tail 10
+kubectl -n werkorder get pods
+kubectl -n werkorder top pods            # geheugen en cpu per pod
+```
+
+Een `port-forward` stopt als de pod waarmee hij verbonden is, herstart. Start het commando dan opnieuw.
+
+### Optioneel: openbaar bereikbaar
+
+Dit maakt een Azure Load Balancer met een openbaar IP-adres aan (extra kosten) en laat alleen jouw IP-adres toe:
+
+```bash
+sed "s#JOUW_IP#$(curl -s https://api.ipify.org)#" k8s/optioneel-publiek.yaml | kubectl apply -f -
+kubectl -n werkorder get svc api-gateway-publiek     # wacht tot EXTERNAL-IP is gevuld
+```
+
+Er is geen TLS: verkeer loopt onversleuteld over http. Voor echt gebruik hoort er een ingress met een certificaat voor
+(bijvoorbeeld cert-manager) en authenticatie voor. Een Azure Load Balancer sluit inactieve verbindingen na een tijd; de
+heartbeat van de service (elke 30 seconden) houdt de WebSocket-verbindingen levend.
+
+### Geheugenbudget op één node
+
+| Onderdeel | Gevraagd (requests) | Maximaal (limits) |
+|---|---|---|
+| redpanda | 1 GiB | 1,5 GiB |
+| ws-microservice | 96 MiB | 192 MiB |
+| werkorder-api | 48 MiB | 128 MiB |
+| api-gateway | 16 MiB | 64 MiB |
+| keycloak | 640 MiB | 1 GiB |
+| **Totaal** | **circa 1,8 GiB** | **circa 2,9 GiB** |
+
+Een node van 8 GiB houdt na Kubernetes zelf (systeempods en gereserveerd geheugen; reken op 5 tot 6 GiB bruikbaar)
+daar ruimte voor over. Keycloak is de zwaarste: het opstarten in `start-dev` heeft een korte piek, vandaar het limiet van 1 GiB.
+
+### Kosten en opruimen
+
+Reken bij één node van het type Standard_B2s_v2 op circa $95 tot $110 per maand als het cluster de hele tijd aanstaat
+(node circa $70, load balancer en IP circa $20 tot $25, schijven circa $5 tot $15). De controlelaag van AKS is gratis in
+de gratis tier. Dit zijn richtprijzen; controleer ze in de Azure Pricing Calculator.
+
+```bash
+az aks stop  --resource-group $RG --name aks-werkorder    # node-kosten stoppen tussen sessies
+az aks start --resource-group $RG --name aks-werkorder    # weer aanzetten
+
+az group delete --name $RG --yes --no-wait                # ALLES verwijderen: cluster, registry, schijven, IP-adressen
+```
+
+Na `stop` en `start` herstarten de pods. De data van Redpanda blijft op de schijf, maar het register van verbindingen
+en de inhaalbuffer van `ws-microservice` zijn dan leeg. Stel in Azure Cost Management een budgetalarm in.
+
 ## Geleerde lessen (troubleshooting)
 
 | Symptoom | Oorzaak | Oplossing |
@@ -408,19 +715,39 @@ push gateway) die per gebruiker routeert, verbindingen beheert en berichten opva
 | `Snappy compression not implemented`, consumer stopt | `rpk` comprimeert standaard met Snappy, kafkajs kent alleen gzip | produceer met `-z none`, of voeg een Snappy-codec toe (`kafkajs-snappy`) |
 | Consumer blijft hetzelfde bericht opnieuw crashen | het bericht is niet als gelezen gemarkeerd | service stoppen, `rpk group seek monteur-notificatie-group --to end --topics werkorder-notificaties`, daarna starten |
 | Consumer crasht op `message.value.toString()` | bericht zonder inhoud (`null`) | controle op lege waarde vóór verwerken |
-| Melding komt niet aan in de app | het `monteurId` in het bericht komt niet overeen met de monteur in de app, of die is niet verbonden | controleer `monteurId` in het bericht en in `?monteur=` en lees de log: `Monteur M-017 is niet verbonden` |
+| Melding komt niet aan in de app | het `monteurId` in het bericht komt niet overeen met de ingelogde monteur, of die is niet verbonden | controleer `monteurId` in het bericht en wie is ingelogd, en lees de log: `Monteur M-017 is niet verbonden` |
 | Berichten verdwijnen naar de DLQ na de overstap op gerichte levering | de producer stuurt het verplichte veld `monteurId` nog niet mee | `monteurId` toevoegen aan het bericht, of het veld eerst optioneel maken |
-| `Verbinding geweigerd` in de app | ontbrekend of ongeldig `monteurId` in de WebSocket-URL | gebruik `?monteur=M-017` (`M-` gevolgd door cijfers) |
+| `Verbinding geweigerd` in de app | de service heeft het token niet geaccepteerd | lees `docker compose logs ws-microservice --tail 20`: daar staat de reden (iss, aud, handtekening, verlopen). Klik op "Opnieuw inloggen". |
+| Elke API-aanroep geeft 401, ook met een vers token | `iss` of `aud` in het token komt niet overeen met de service | decodeer het token (`echo $T17 \| cut -d. -f2 \| base64 -d`) en vergelijk `iss` met `OIDC_ISSUER` en `aud` met `OIDC_AUDIENCE`. Het token moet uitgegeven zijn via `http://localhost:8180`, niet via `http://keycloak:8080`. |
+| `aud` mist `werkorders-api` | de audience mapper is niet geladen (oud realm) | `docker compose up -d --force-recreate keycloak` en opnieuw inloggen |
+| API of WebSocket geeft 503 / sluiting 1013 | Keycloak is nog aan het opstarten of onbereikbaar en de sleutels zijn nog niet opgehaald | wacht tot Keycloak klaar is (`docker compose logs keycloak --tail 5`); de service probeert het bij het volgende verzoek opnieuw |
+| Het inlogscherm laadt niet, of `redirect_uri` is ongeldig | Keycloak is nog niet klaar, of je opent de app op een ander adres dan `http://localhost/` | open `http://localhost/` (niet `127.0.0.1` of een computernaam); toegestaan zijn `http://localhost/*` en `http://localhost:8080/*` |
+| Wijziging in het realm-bestand werkt niet | Keycloak slaat het import over als het realm al bestaat | `docker compose up -d --force-recreate keycloak` |
+| Keycloak start niet, of wordt steeds afgesloten | te weinig geheugen, of fout in `compose-snippet.yml` | `docker compose logs keycloak --tail 40`; controleer de inspringing en of Docker Desktop minstens 4 GB geheugen heeft |
+| Op AKS: inloggen mislukt of de pagina van Keycloak laadt niet | de tweede `port-forward` (`svc/keycloak 8180:8080`) draait niet | start hem; de app en Keycloak hebben elk hun eigen `port-forward` nodig |
+| Op AKS: Keycloak pod blijft `Starting` of `OOMKilled` | start-dev heeft een geheugenpiek bij het opstarten | `kubectl -n werkorder describe pod -l app=keycloak`; verhoog het limiet in `60-keycloak.yaml` naar 1,5Gi en `-Xmx` mee |
 | Melding komt aan, detail zegt "Werkorder niet gevonden" | het id staat niet in de voorbeelddata (alleen WO-1001 t/m WO-1003) | gebruik een bestaand id, of voeg de werkorder toe in `werkorder-api/server.js` |
+| Melding komt aan, detail zegt "Geen toegang" | de werkorder is van een andere monteur (bijvoorbeeld WO-1003 voor M-017) | dat is de eigenaarscheck die werkt; stuur het bericht met een werkorder van de juiste monteur (M-017: WO-1001 en WO-1002, M-022: WO-1003) |
 | Meldingen zijn weg na wisselen van monteur of herladen | de lijst stond alleen in het geheugen van de pagina (oudere versie van de app) | gebruik de huidige `monteur-app.html`: die bewaart de lijst in `localStorage` en haalt gemiste meldingen in |
 | Na herstart van `ws-microservice` komen oude meldingen niet terug | de inhaalbuffer leeft in het geheugen | bekende beperking, zie "Inhalen van gemiste meldingen" |
 | `Verbinding geweigerd: since is ongeldig` | `since` is geen ISO 8601-tijdstip in UTC | gebruik bijvoorbeeld `2026-10-16T14:03:22.123Z` |
+| Pod `ImagePullBackOff` op AKS | het cluster mag de registry niet lezen, of de tag bestaat niet | `az aks update --resource-group $RG --name aks-werkorder --attach-acr $ACR`, dan `./k8s/deploy.sh $ACR` opnieuw |
+| `az aks create` meldt dat de VM-grootte niet beschikbaar is of dat de quota op is | niet elke grootte is overal vrij beschikbaar | kies een andere grootte met 8 GiB, bijvoorbeeld `Standard_B2as_v2`, of kijk met `az vm list-skus --location westeurope --size Standard_B2 --output table` |
+| Pod `redpanda-0` blijft `Pending` | de schijf kan niet worden aangemaakt | `kubectl -n werkorder describe pvc data-redpanda-0` en `kubectl -n werkorder describe pod redpanda-0` |
+| Pod `redpanda-0` herstart steeds, `OOMKilled` | het geheugenlimiet is te laag voor de belasting | verhoog het limiet in `10-redpanda.yaml`, en `--memory` mee |
+| `ws-microservice` in `CrashLoopBackOff` met een rechtenfout | de image draait niet goed als gebruiker 1000 | bekijk `kubectl -n werkorder logs deploy/ws-microservice`; haal `runAsUser: 1000` uit `30-ws-microservice.yaml` als het aan de gebruiker ligt |
+| Gateway-pod crasht met `host not found in upstream` | een service ontbreekt | `kubectl -n werkorder get svc`; controleer de namen `ws-microservice` en `werkorder-api` |
+| Wijziging in `nginx.conf` of `monteur-app.html` werkt niet | de gateway leest ConfigMaps alleen bij het starten | `./k8s/deploy.sh $ACR` opnieuw draaien (herstart de gateway), of `kubectl -n werkorder rollout restart deployment/api-gateway` |
 | Twee regels aan elkaar in `rpk` | meerdere regels tegelijk geplakt in het interactieve commando | één regel tegelijk plakken, of `printf ... \| docker exec -i ...` gebruiken |
 
 ## Mogelijke vervolgstappen
 
+- Kubernetes uitbreiden met TLS (ingress en cert-manager, met een eigen hostnaam voor Keycloak), een Helm-chart of
+  Kustomize, en een pipeline die de images bouwt en uitrolt.
+- Keycloak productieklaar maken: `start` in plaats van `start-dev`, een externe database, meerdere instanties, het
+  monteurId als eigen attribuut in plaats van de gebruikersnaam, en koppeling aan het echte gebruikersbestand.
+- Bestaande WebSocket-verbindingen sluiten zodra rechten van een monteur worden ingetrokken.
 - De inhaalbuffer duurzaam en gedeeld maken (Redis of database), met een volgnummer per monteur in plaats van een tijdstip.
-- Authenticatie met een token, gevalideerd in de gateway, en controle in de API of de werkorder bij de monteur hoort.
 - Meerdere instanties van de notificatieservice (de consumer-group-kwestie).
 - Berichten uit de DLQ na herstel opnieuw aanbieden aan het hoofdtopic (replay).
 - Het berichtcontract vastleggen in een AsyncAPI-specificatie en een JSON Schema, afgedwongen via de schema registry
