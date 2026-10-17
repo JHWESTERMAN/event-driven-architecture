@@ -1,0 +1,48 @@
+{
+  "name": "main beschermen",
+  "target": "branch",
+  "source_type": "Repository",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "include": ["~DEFAULT_BRANCH"],
+      "exclude": []
+    }
+  },
+  "bypass_actors": [],
+  "rules": [
+    { "type": "deletion" },
+    { "type": "non_fast_forward" },
+    {
+      "type": "pull_request",
+      "parameters": {
+        "required_approving_review_count": 0,
+        "dismiss_stale_reviews_on_push": false,
+        "require_code_owner_review": false,
+        "require_last_push_approval": false,
+        "required_review_thread_resolution": false
+      }
+    },
+    {
+      "type": "required_status_checks",
+      "parameters": {
+        "strict_required_status_checks_policy": false,
+        "do_not_enforce_on_create": false,
+        "required_status_checks": [
+          { "context": "Tests (contracts)" },
+          { "context": "Tests (source-adapter)" },
+          { "context": "Tests (target-adapter)" },
+          { "context": "Tests (werkorder-api)" },
+          { "context": "Shellscripts" },
+          { "context": "Geen geheimen in git" },
+          { "context": "Image bouwen (source-adapter)" },
+          { "context": "Image bouwen (target-adapter)" },
+          { "context": "Image bouwen (werkorder-api)" },
+          { "context": "Image bouwen (bron-app)" },
+          { "context": "Image bouwen (microservice)" },
+          { "context": "Rooktest (hele keten)" }
+        ]
+      }
+    }
+  ]
+}
