@@ -628,7 +628,7 @@ Dezelfde applicatie draait ook op Kubernetes. De manifests staan in `k8s/`. Ze z
 | `nginx.conf` en HTML als gemounte bestanden | twee `ConfigMap`s, aangemaakt door `deploy.sh` |
 | Keycloak met `admin/admin` en het realm-bestand | een `Deployment` (`60-keycloak.yaml`); het realm in een `ConfigMap`, het beheerwachtwoord in een `Secret` dat `deploy.sh` willekeurig aanmaakt |
 | `build:` | de image wordt in Azure Container Registry (ACR) gebouwd en uit die registry gehaald |
-| Docker-secrets uit `secrets/` (gevuld door Vault), `NAAM_FILE` | Kubernetes-Secrets als projected volume onder `/run/secrets` (zelfde `NAAM_FILE`); standaard door `deploy.sh` willekeurig aangemaakt, of uit Azure Key Vault met `KEYVAULT_NAME=...` (`70-secrets-keyvault.yaml`, niet op een cluster getest) |
+| Docker-secrets uit `secrets/` (gevuld door Vault), `NAAM_FILE` | Kubernetes-Secrets als projected volume onder `/geheimen` (zelfde `NAAM_FILE`; niet onder `/run/secrets`, want daar maakt Kubernetes zelf het service-accounttoken aan en een alleen-lezen map daar laat de container niet starten); standaard door `deploy.sh` willekeurig aangemaakt, of uit Azure Key Vault met `KEYVAULT_NAME=...` (`70-secrets-keyvault.yaml`, niet op een cluster getest) |
 | TLS-keystore uit `scripts/maak-certs.sh` | Secret `artemis-tls` (`broker.p12`, `ca.pem`, `keystore-password`), door `deploy.sh` aangemaakt met hetzelfde script; voor productie cert-manager |
 
 ### Stap 1: voorbereiding

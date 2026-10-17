@@ -35,14 +35,14 @@ spec:
       containers:
         - name: keycloak
           image: quay.io/keycloak/keycloak:26.0.7
-          # Keycloak kent geen NAAM_FILE: dit script leest de geheimen uit /run/secrets en zet ze alleen in de omgeving van het
+          # Keycloak kent geen NAAM_FILE: dit script leest de geheimen uit /geheimen en zet ze alleen in de omgeving van het
           # Keycloak-proces (niet in de podspecificatie). Het client-secret komt via ${...} in het realm-bestand.
           command:
             - /bin/bash
             - -c
             - |
-              export KC_BOOTSTRAP_ADMIN_PASSWORD="$(cat /run/secrets/keycloak_admin_password)"
-              export TARGET_ADAPTER_CLIENT_SECRET="$(cat /run/secrets/target_adapter_client_secret)"
+              export KC_BOOTSTRAP_ADMIN_PASSWORD="$(cat /geheimen/keycloak_admin_password)"
+              export TARGET_ADAPTER_CLIENT_SECRET="$(cat /geheimen/target_adapter_client_secret)"
               exec /opt/keycloak/bin/kc.sh "$@"
             - --
           args: ["start-dev", "--import-realm"]
@@ -85,7 +85,7 @@ spec:
             - name: realm
               mountPath: /opt/keycloak/data/import
               readOnly: true
-            - { name: geheimen, mountPath: /run/secrets, readOnly: true }
+            - { name: geheimen, mountPath: /geheimen, readOnly: true }
       volumes:
         - name: geheimen
           projected:
