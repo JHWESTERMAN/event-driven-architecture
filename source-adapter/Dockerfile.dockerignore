@@ -1,0 +1,7 @@
+# Alleen wat de image nodig heeft; de rest van de repository blijft buiten de bouwcontext
+*
+!source-adapter/package.json
+!source-adapter/package-lock.json
+!source-adapter/src
+!contracts/bron/werkopdracht-1.0.schema.json
+!contracts/canoniek/eam-workorder-1.0.schema.json
