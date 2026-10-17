@@ -38,7 +38,7 @@ services:
 
     command: >
       -c "
-      for t in werkorder-notificaties werkorder-notificaties.dlq; do
+      for t in werkorder-notificaties werkorder-notificaties.dlq werkorder-events; do
         rpk topic describe $$t -X brokers=redpanda:9092 ||
         rpk topic create $$t -X brokers=redpanda:9092 -p 3;
       done
@@ -68,8 +68,23 @@ services:
     restart: unless-stopped
     environment:
       PORT: 8081
+      DB_PATH: /data/werkorders.db          # SQLite (PoC); het volume houdt de data over herstarts heen
+      KAFKA_BROKER: redpanda:9092           # de outbox-relay publiceert hiernaartoe
+      INTERN_API_KEY: ${INTERN_API_KEY:-dev-intern-sleutel}   # alleen PoC; zie .env.example
+    volumes:
+      - werkorder-data:/data
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      redpanda-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8081/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
     expose:
-      - "8081" 
+      - "8081"
 
   api-gateway:
     image: nginx:alpine
@@ -98,6 +113,117 @@ services:
       - "127.0.0.1:8180:8080"                      # alleen bereikbaar vanaf deze computer
     mem_limit: 1g
 
+  # ---------------------------------------------------------------
+  # Taakgerichte broker (Apache ActiveMQ Artemis): bron -> monteursysteem
+  # Queue eam.workorder.v1 en Dead Letter Address staan in artemis/etc-override/broker.xml.
+  # Console: http://localhost:8161 (alleen vanaf deze computer). Inloggegevens: zie .env.example.
+  # ---------------------------------------------------------------
+  artemis:
+    image: apache/artemis:2.57.0
+    container_name: artemis
+    restart: unless-stopped
+    environment:
+      ARTEMIS_USER: ${ARTEMIS_USER:-artemis}
+      ARTEMIS_PASSWORD: ${ARTEMIS_PASSWORD:-artemis}      # alleen lokaal; in k8s komt dit uit een Secret
+      EXTRA_ARGS: "--http-host 0.0.0.0 --relax-jolokia --java-memory 512M"   # standaardwaarde plus een kleinere heap
+    volumes:
+      - artemis-data:/var/lib/artemis-instance
+      - ./artemis/etc-override:/var/lib/artemis-instance/etc-override:ro
+    ports:
+      - "127.0.0.1:61616:61616"    # CORE en AMQP 1.0
+      - "127.0.0.1:8161:8161"      # webconsole
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/61616' || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    mem_limit: 1g
+
+  # ---------------------------------------------------------------
+  # Source-adapter (connector-in): valideert het bronbericht, vertaalt naar het canonieke EAM-model en zet het
+  # persistent op de queue eam.workorder.v1. Bouwcontext is de repo-root, omdat hij de schema's uit contracts/ nodig heeft.
+  # ---------------------------------------------------------------
+  source-adapter:
+    build:
+      context: .
+      dockerfile: source-adapter/Dockerfile
+    container_name: source-adapter
+    restart: unless-stopped
+    environment:
+      PORT: 8090
+      BROKER_HOST: artemis
+      BROKER_PORT: 61616
+      BROKER_QUEUE: eam.workorder.v1
+      BROKER_USER: ${ARTEMIS_USER:-artemis}
+      BROKER_PASSWORD: ${ARTEMIS_PASSWORD:-artemis}
+    depends_on:
+      artemis:
+        condition: service_healthy
+    expose:
+      - "8090"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8090/health >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    mem_limit: 128m
+
+  # ---------------------------------------------------------------
+  # Target-adapter (connector-out): queue eam.workorder.v1 -> valideren -> monteur-model -> PUT werkorder-api
+  # ---------------------------------------------------------------
+  target-adapter:
+    build:
+      context: .
+      dockerfile: target-adapter/Dockerfile
+    container_name: target-adapter
+    restart: unless-stopped
+    environment:
+      PORT: 8091
+      BROKER_HOST: artemis
+      BROKER_PORT: 61616
+      BROKER_QUEUE: eam.workorder.v1
+      BROKER_DLQ: eam.workorder.v1.dlq
+      BROKER_USER: ${ARTEMIS_USER:-artemis}
+      BROKER_PASSWORD: ${ARTEMIS_PASSWORD:-artemis}
+      API_URL: http://werkorder-api:8081
+      INTERN_API_KEY: ${INTERN_API_KEY:-dev-intern-sleutel}
+    depends_on:
+      artemis:
+        condition: service_healthy
+      werkorder-api:
+        condition: service_healthy
+    expose:
+      - "8091"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8091/health >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    mem_limit: 128m
+
+  # ---------------------------------------------------------------
+  # Bronapp (OMS-simulator): vervangt producer.js. Zie bron-app/server.js en contracts/bron/.
+  # Bedien hem met curl op http://localhost:8095. Met een lege ADAPTER_URL in .env draait hij droog.
+  # ---------------------------------------------------------------
+  bron-app:
+    build: ./bron-app
+    container_name: bron-app
+    restart: unless-stopped
+    environment:
+      PORT: 8095
+      ADAPTER_URL: ${ADAPTER_URL-http://source-adapter:8090/werkopdracht}      # alleen leeg als je dat in .env zo zet (dan draait hij droog)
+      AUTO_INTERVAL_MS: ${BRON_AUTO_INTERVAL_MS:-0}
+    depends_on:
+      - source-adapter
+    ports:
+      - "127.0.0.1:8095:8095"
+    mem_limit: 128m
+
 volumes:
   redpanda-data:
+  artemis-data:
+  werkorder-data:
 
