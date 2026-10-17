@@ -42,7 +42,8 @@ tegen een echte broker gecontroleerd (zie `docs/architectuur-review.md`, hoofdst
 |---|---|
 | `PORT` | `8090` |
 | `BROKER_HOST`, `BROKER_PORT` | `artemis`, `61616` |
-| `BROKER_USER`, `BROKER_PASSWORD` | `artemis`, `artemis` (lokaal; in k8s uit een Secret) |
+| `BROKER_USER`, `BROKER_PASSWORD_FILE` | gebruikersnaam; pad naar het bestand met het wachtwoord (Compose: `/run/secrets/...`, k8s: gemonteerde Secret). `BROKER_PASSWORD` (zonder `_FILE`) werkt alleen nog voor lokale tests (standaard `artemis`) |
+| `BROKER_TLS_CA` | pad naar het CA-certificaat (PEM). Gezet = TLS naar de broker, met controle van keten en hostnaam (`BROKER_HOST`, of `BROKER_TLS_SERVERNAME`). `BROKER_TLS=true` gebruikt de systeem-CA's |
 | `BROKER_QUEUE` | `eam.workorder.v1` |
 | `BROKER_SEND_TIMEOUT_MS` | `5000` |
 | `CONTRACTS_DIR` | `../contracts` (in de image `/app/contracts`) |

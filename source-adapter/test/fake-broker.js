@@ -3,7 +3,7 @@
 // niet het gedrag van Artemis zelf. Gedrag per bericht: accepteer | wijs-af | geef-vrij | negeer (geen antwoord).
 const rhea = require('rhea');
 
-function maakFakeBroker() {
+function maakFakeBroker({ tls } = {}) {
   const container = rhea.create_container({ autoaccept: false });
   container.sasl_server_mechanisms.enable_plain((gebruiker, wachtwoord) => gebruiker === 'x' && wachtwoord === 'y');
 
@@ -22,7 +22,7 @@ function maakFakeBroker() {
   });
 
   fake.start = (poort = 0) => new Promise((resolve, reject) => {
-    fake.server = container.listen({ port: poort, host: '127.0.0.1', autoaccept: false });
+    fake.server = container.listen({ port: poort, host: '127.0.0.1', autoaccept: false, ...(tls ? { transport: 'tls', key: tls.key, cert: tls.cert } : {}) });
     fake.server.on('connection', (s) => { fake.sockets.add(s); s.on('close', () => fake.sockets.delete(s)); });
     fake.server.once('error', reject);
     fake.server.once('listening', () => resolve(fake.server.address().port));

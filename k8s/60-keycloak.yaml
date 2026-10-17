@@ -35,6 +35,16 @@ spec:
       containers:
         - name: keycloak
           image: quay.io/keycloak/keycloak:26.0.7
+          # Keycloak kent geen NAAM_FILE: dit script leest de geheimen uit /run/secrets en zet ze alleen in de omgeving van het
+          # Keycloak-proces (niet in de podspecificatie). Het client-secret komt via ${...} in het realm-bestand.
+          command:
+            - /bin/bash
+            - -c
+            - |
+              export KC_BOOTSTRAP_ADMIN_PASSWORD="$(cat /run/secrets/keycloak_admin_password)"
+              export TARGET_ADAPTER_CLIENT_SECRET="$(cat /run/secrets/target_adapter_client_secret)"
+              exec /opt/keycloak/bin/kc.sh "$@"
+            - --
           args: ["start-dev", "--import-realm"]
           ports:
             - name: http
@@ -42,18 +52,8 @@ spec:
           env:
             - name: KC_BOOTSTRAP_ADMIN_USERNAME
               value: admin
-            - name: KC_BOOTSTRAP_ADMIN_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: keycloak-admin       # aangemaakt door deploy.sh met een willekeurig wachtwoord
-                  key: password
             - name: KC_HOSTNAME
               value: http://localhost:8180
-            - name: TARGET_ADAPTER_CLIENT_SECRET   # komt via ${...} in het realm-bestand (client target-adapter)
-              valueFrom:
-                secretKeyRef:
-                  name: target-adapter-oidc
-                  key: secret
             - name: JAVA_OPTS_KC_HEAP
               value: "-Xms64m -Xmx512m"
           resources:
@@ -85,7 +85,17 @@ spec:
             - name: realm
               mountPath: /opt/keycloak/data/import
               readOnly: true
+            - { name: geheimen, mountPath: /run/secrets, readOnly: true }
       volumes:
+        - name: geheimen
+          projected:
+            sources:
+              - secret:
+                  name: keycloak-admin       # deploy.sh maakt hem met een willekeurig wachtwoord, of Key Vault via 70-secrets-keyvault.yaml
+                  items: [{ key: password, path: keycloak_admin_password }]
+              - secret:
+                  name: target-adapter-oidc
+                  items: [{ key: secret, path: target_adapter_client_secret }]
         - name: realm
           configMap:
             name: keycloak-realm              # aangemaakt door deploy.sh uit keycloak/werkorders-realm.json

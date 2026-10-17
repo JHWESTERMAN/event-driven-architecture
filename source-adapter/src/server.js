@@ -16,6 +16,7 @@ const path = require('path');
 const { laadValidators } = require('./validate');
 const { bronNaarCanoniek, BronFout } = require('./transform');
 const { BrokerVerbinding, BrokerFout } = require('./broker');
+const { leesGeheim, brokerTlsOpties } = require('./omgeving');
 
 const MAX_BODY = 256 * 1024;
 const CORRELATIE = /^[A-Za-z0-9._:-]{1,64}$/;
@@ -159,7 +160,8 @@ function configUitOmgeving(env = process.env) {
     brokerHost: env.BROKER_HOST || 'artemis',
     brokerPort: Number(env.BROKER_PORT) || 61616,
     brokerUser: env.BROKER_USER || 'artemis',
-    brokerPassword: env.BROKER_PASSWORD || 'artemis',
+    brokerPassword: leesGeheim(env, 'BROKER_PASSWORD', 'artemis'),
+    brokerTls: brokerTlsOpties(env),
     sendTimeoutMs: Number(env.BROKER_SEND_TIMEOUT_MS) || 5000,
     contractsDir: env.CONTRACTS_DIR || path.join(__dirname, '..', '..', 'contracts')
   };
@@ -171,10 +173,10 @@ if (require.main === module) {
   const config = configUitOmgeving();
   const log = maakLogger();
   const validators = laadValidators(config.contractsDir);
-  const broker = new BrokerVerbinding({ host: config.brokerHost, port: config.brokerPort, user: config.brokerUser, password: config.brokerPassword, adres: config.queue, log });
+  const broker = new BrokerVerbinding({ host: config.brokerHost, port: config.brokerPort, user: config.brokerUser, password: config.brokerPassword, adres: config.queue, tls: config.brokerTls, log });
   broker.start();
   const server = maakServer({ config, broker, validators, log });
-  server.listen(config.port, () => log({ stap: 'start', gebeurtenis: 'luistert', poort: config.port, broker: `${config.brokerHost}:${config.brokerPort}`, queue: config.queue }));
+  server.listen(config.port, () => log({ stap: 'start', gebeurtenis: 'luistert', poort: config.port, broker: `${config.brokerHost}:${config.brokerPort}`, tls: Boolean(config.brokerTls.transport), queue: config.queue }));
   for (const signaal of ['SIGTERM', 'SIGINT']) {
     process.on(signaal, () => { broker.close(); server.close(() => process.exit(0)); setTimeout(() => process.exit(0), 3000).unref(); });
   }

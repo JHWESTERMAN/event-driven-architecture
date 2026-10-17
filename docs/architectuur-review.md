@@ -255,9 +255,21 @@ Genomen (2026-10-17):
    `INTERN_API_KEY` bestaat nog alleen voor lokaal testen zonder Keycloak.
 8. **Artemis met minimale rechten per partij:** beheerder (rol `amq`), source-adapter (rol `eam-source`: alleen versturen naar
    `eam.workorder.v1`) en target-adapter (rol `eam-target`: ontvangen van de queue, versturen naar de `.dlq`). Gebruikers en rollen komen
-   uit `artemis/init-users.sh`; de rechten staan in `broker.xml`. Productie: wachtwoorden uit een kluis, TLS op de acceptor.
+   uit `artemis/init-users.sh`; de rechten staan in `broker.xml`.
+9. **TLS op de Artemis-acceptor** (`sslEnabled=true`, TLS 1.2 en 1.3, PKCS12-keystore). De adapters vertrouwen alleen de eigen CA en
+   controleren keten én hostnaam; er is geen schakelaar om dat uit te zetten. Geen clientcertificaten (mTLS): de adapters loggen in met
+   gebruikersnaam en wachtwoord, wat veilig is omdat de verbinding versleuteld is. Certificaten lokaal: `scripts/maak-certs.sh`; productie:
+   CA van de organisatie of cert-manager.
+10. **Geheimen uit een kluis, als bestand.** Applicaties lezen `NAAM_FILE` (pad onder `/run/secrets`) in plaats van een omgevingsvariabele, zodat
+   wachtwoorden niet in `docker inspect` of in `/proc/<pid>/environ` staan. De bron is lokaal HashiCorp Vault (`scripts/kluis.sh`, leestoken met
+   alleen-lezenbeleid, kortlevend) en op AKS Azure Key Vault via de Secrets Store CSI-driver (`k8s/70-secrets-keyvault.yaml`). Waarom bestanden en
+   geen directe kluisaanroep in de code: de applicaties blijven onafhankelijk van de kluis, en de kluis kan zonder codewijziging worden vervangen.
+   Lokaal komt `.env` zonder wachtwoorden; de rooktest (stap 4d) controleert dat geen enkel geheim in `docker inspect` staat.
 
-Geverifieerd op 2026-10-17 met `scripts/smoketest.sh --volledig` (42 controles groen, Docker Compose, Artemis 2.57.0):
+TLS en kluis (besluit 9 en 10) zijn op 2026-10-17 geverifieerd met `scripts/smoketest.sh --volledig` (alles groen, inclusief stap 4d): plaintext AMQP wordt
+geweigerd, TLS met de juiste gegevens werkt, het certificaat past bij `artemis` en niet bij een andere naam, de opstartgebruiker kan niet inloggen en geen geheim staat in `docker inspect`.
+
+Eerder geverifieerd op 2026-10-17 met `scripts/smoketest.sh --volledig` (42 controles groen, Docker Compose, Artemis 2.57.0):
 
 - `broker.xml` wordt door Artemis geaccepteerd; queue `eam.workorder.v1` en DLA bestaan.
 - Keten bron-app, source-adapter, Artemis, target-adapter, werkorder-api (SQLite), Kafka (`werkorder-events` en `werkorder-notificaties`) werkt voor nieuw, wijziging en intrekking.
@@ -271,7 +283,7 @@ Geverifieerd op 2026-10-17 met `scripts/smoketest.sh --volledig` (42 controles g
 Nog te verifiëren:
 
 - Mapping van `subject` en `group_id` naar `JMSType` en `JMSXGroupID` bij een JMS-consument.
-- Kubernetes: de manifests in `k8s/` zijn nooit toegepast op een cluster.
+- Kubernetes: `k8s/70-secrets-keyvault.yaml`, de Secret-volumes, het TLS-Secret `artemis-tls` en `deploy.sh` zijn niet op een cluster toegepast.
 
 Een canoniek model tussen één bron en één ontvanger kost twee transformaties in plaats van één. Het verdient zich terug
 vanaf ongeveer drie gekoppelde systemen. Voor deze PoC is het vooral waardevol als demonstratie van het patroon; houd het model

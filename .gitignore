@@ -6,3 +6,5 @@ data/
 *.db
 *.db-wal
 *.db-shm
+# Geheimen en TLS-sleutels uit scripts/kluis.sh en scripts/maak-certs.sh: nooit committen
+secrets/

@@ -48,10 +48,15 @@
       <critical-analyzer-policy>HALT</critical-analyzer-policy>
 
       <acceptors>
-         <!-- AMQP 1.0 en CORE op een poort. amqpDuplicateDetection=true laat de broker ontdubbelen op de
-              application property _AMQ_DUPL_ID, als de source-adapter die meestuurt (waarde: messageId).
-              Getest met scripts/smoketest.sh (stap 7): de broker laat een herhaald bericht maar een keer door. -->
-         <acceptor name="artemis">tcp://0.0.0.0:61616?tcpSendBufferSize=1048576;tcpReceiveBufferSize=1048576;amqpMinLargeMessageSize=102400;protocols=CORE,AMQP;useEpoll=true;amqpCredits=1000;amqpLowCredits=300;amqpDuplicateDetection=true;supportAdvisory=false;suppressInternalManagementObjects=true</acceptor>
+         <!-- AMQP 1.0 en CORE op een poort, alleen via TLS (sslEnabled=true): zonder TLS komt niemand binnen, ook geen
+              wachtwoord over de lijn. Het servercertificaat staat in een PKCS12-keystore die artemis/init-users.sh naast
+              deze broker.xml zet (scripts/maak-certs.sh maakt hem); het wachtwoord van de keystore vervangt init-users.sh
+              hieronder voor de plaatshouder @KEYSTORE_PASSWORD@, zodat het nooit in git staat. De adapters controleren dit
+              certificaat tegen de CA en de hostnaam (BROKER_TLS_CA). Geen clientcertificaten: de adapters loggen in met
+              gebruikersnaam en wachtwoord (SASL PLAIN), veilig omdat de verbinding versleuteld is.
+              amqpDuplicateDetection=true laat de broker ontdubbelen op de application property _AMQ_DUPL_ID, als de
+              source-adapter die meestuurt (waarde: messageId). Getest met scripts/smoketest.sh (stap 7). -->
+         <acceptor name="artemis">tcp://0.0.0.0:61616?sslEnabled=true;keyStorePath=/var/lib/artemis-instance/etc/broker.p12;keyStoreType=PKCS12;keyStorePassword=@KEYSTORE_PASSWORD@;enabledProtocols=TLSv1.2,TLSv1.3;tcpSendBufferSize=1048576;tcpReceiveBufferSize=1048576;amqpMinLargeMessageSize=102400;protocols=CORE,AMQP;useEpoll=true;amqpCredits=1000;amqpLowCredits=300;amqpDuplicateDetection=true;supportAdvisory=false;suppressInternalManagementObjects=true</acceptor>
       </acceptors>
 
       <!-- Rechten per rol. De gebruikers en rollen zelf maakt artemis/init-users.sh (artemis-users/roles.properties):

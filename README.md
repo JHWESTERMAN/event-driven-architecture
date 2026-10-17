@@ -84,6 +84,13 @@ Vereist: Docker Desktop (met `docker compose`). Node.js is lokaal alleen nodig v
 [`keycloak/compose-snippet.yml`](keycloak/compose-snippet.yml) onder `services:` (let op de inspringing: `keycloak:` staat op
 dezelfde hoogte als `redpanda:`). Een Mac met 8 GB heeft hier ruimte voor: Keycloak is begrensd op 1 GB.
 
+**Eerst de geheimen en certificaten klaarzetten** (wachtwoorden staan niet in `.env` of in git; zie [Geheimen en TLS](#geheimen-en-tls)):
+
+```bash
+cp .env.example .env              # alleen instellingen, geen wachtwoorden
+./scripts/kluis.sh klaarzetten    # kluis starten en vullen, geheimen naar secrets/, TLS-certificaten maken
+```
+
 ```bash
 # bouwen en starten
 docker compose up -d --build
@@ -107,7 +114,7 @@ Open daarna **http://localhost/**. De app stuurt je naar Keycloak. Log in met ee
 | `m-022` | `welkom022` | monteur **M-022** (S. Jansen) |
 
 De status rechtsboven moet groen worden ("Verbonden"). De beheerconsole van Keycloak staat op http://localhost:8180
-(gebruiker `admin`, wachtwoord `admin`; alleen bereikbaar vanaf je eigen computer).
+(gebruiker `admin`; het wachtwoord staat in `secrets/keycloak_admin_password`; alleen bereikbaar vanaf je eigen computer).
 
 In de logs van de microservice zie je onder andere:
 
@@ -115,6 +122,40 @@ In de logs van de microservice zie je onder andere:
 Succesvol verbonden met Redpanda/Kafka broker: redpanda:9092
 Luisteren naar Kafka topic: 'werkorder-notificaties' (dead letter topic: 'werkorder-notificaties.dlq')...
 ```
+
+## Geheimen en TLS
+
+Twee productie-aanvullingen op de taakgerichte keten: de verbinding met de broker is versleuteld en geverifieerd, en wachtwoorden komen uit een kluis in plaats van uit `.env`.
+
+### TLS op de Artemis-acceptor
+
+| Onderdeel | Keuze |
+|---|---|
+| Acceptor | `sslEnabled=true`, alleen TLS 1.2 en 1.3, op poort 61616 voor CORE en AMQP. Een verbinding zonder TLS komt niet door de handdruk, dus er gaat ook geen wachtwoord onversleuteld over de lijn. |
+| Servercertificaat | Een PKCS12-keystore (`secrets/tls/broker.p12`) die `scripts/maak-certs.sh` uitgeeft met een lokale CA. Geldig voor `artemis`, `localhost`, `127.0.0.1` en de k8s-namen `artemis.werkorder.svc[.cluster.local]`. |
+| Keystore-wachtwoord | Uit de kluis. `artemis/init-users.sh` vult het in op de plaatshouder `@KEYSTORE_PASSWORD@` in `broker.xml`, zodat het niet in git staat. |
+| Clients | De adapters vertrouwen alleen de eigen CA (`BROKER_TLS_CA`) en controleren certificaatketen én hostnaam. Er is bewust geen schakelaar om de controle uit te zetten. |
+| Authenticatie | Geen clientcertificaten (mTLS): de adapters loggen in met eigen gebruikersnaam en wachtwoord, per adapter beperkte rechten. Dat blijft veilig omdat de verbinding versleuteld is; mTLS is een mogelijke vervolgstap. |
+| Console | `http://localhost:8161` blijft gewoon HTTP, maar is alleen vanaf deze computer bereikbaar. |
+
+### Geheimen uit een kluis
+
+Het pad van een geheim: **kluis → bestand → `/run/secrets/<naam>` in de container → `NAAM_FILE` in de applicatie**.
+
+| Geheim | Gebruikt door | In de applicatie |
+|---|---|---|
+| `artemis_admin_password`, `artemis_source_password`, `artemis_target_password` | `artemis-init` (schrijft de gebruikers), de adapters | `ADMIN_PASSWORD_FILE`, `BROKER_PASSWORD_FILE` |
+| `artemis_keystore_password` | `artemis-init`, `maak-certs.sh` | `KEYSTORE_PASSWORD_FILE` |
+| `target_adapter_client_secret` | Keycloak (realm-import), target-adapter | `OIDC_CLIENT_SECRET_FILE` |
+| `keycloak_admin_password` | Keycloak | opstartscript in `docker-compose.yml` |
+
+- **Conventie.** `NAAM_FILE=<pad>` gaat voor `NAAM=<waarde>` (zoals in de officiële Postgres- en MySQL-images). Een ontbrekend of leeg bestand is een duidelijke fout bij het opstarten, geen stille terugval op een standaardwachtwoord.
+- **Waarom bestanden en geen omgevingsvariabelen.** Een omgevingsvariabele staat in `docker inspect`, in `/proc/<pid>/environ` en komt makkelijk in een crashdump of log terecht. Een bestand onder `/run/secrets` niet. De rooktest controleert dat geen enkel geheim in `docker inspect` van de containers staat.
+- **Lokale kluis.** `./scripts/kluis.sh` start HashiCorp Vault (Compose-profiel `kluis`), initialiseert en ontgrendelt hem, maakt ontbrekende geheimen willekeurig aan (48 hex-tekens) en rolt ze uit met een kortlevend leestoken dat alleen mag lezen (beleid `werkorder-lezer`). De rest van de omgeving draait ook zonder dat Vault aan staat. Na een herstart van de kluis: `./scripts/kluis.sh ontgrendel`.
+- **Op AKS.** `k8s/70-secrets-keyvault.yaml` haalt dezelfde geheimen uit Azure Key Vault met de Secrets Store CSI-driver en een workload identity (zie het bestand voor de stappen). De applicaties merken niets: ze lezen dezelfde bestanden of dezelfde Kubernetes-Secrets. **Niet op een cluster getest.**
+- **Bestaande omgeving.** Verwijder de wachtwoorden uit je oude `.env`; ze worden niet meer gelezen. Omdat Artemis zijn configuratie alleen bij het aanmaken van het volume leest, werkt een eerste keer overstappen met `docker compose down -v`.
+
+Beperkingen van de lokale opzet (bewust, zie ook "Van PoC naar productie"): de unseal-sleutel en het root-token staan in `secrets/.vault-init.json` (één sleutel, geen sleutelhouders), Vault luistert zonder TLS op `127.0.0.1`, de geheime bestanden zijn leesbaar (644) omdat Docker ze met de rechten van de host monteert en de containers als niet-root draaien (de map `secrets/` is 700), en een wachtwoord roteren vraagt om het Artemis-volume opnieuw aan te maken omdat de gebruikers daar bij het aanmaken worden vastgelegd.
 
 ## Testen
 
@@ -554,6 +595,7 @@ Dit project is een proof-of-concept. Bij duizenden monteurs komen er andere vrag
 | Onderwerp | Waarom het uitmaakt |
 |---|---|
 | **Authenticatie** | Hier opgelost met Keycloak, tokens en een eigenaarscheck. Voor productie ontbreekt: TLS en een eigen hostnaam voor Keycloak, Keycloak met een echte database en meerdere instanties (nu `start-dev`), het verwijderen van de demo-gebruikers en de test-client met password grant, een sterk beheerwachtwoord, een koppeling van gebruikers aan het bronsysteem, en een manier om bestaande verbindingen te sluiten als rechten intrekken (nu pas bij verlopen van het token, maximaal 5 minuten). |
+| **Geheimen en TLS** | Hier opgelost met TLS op de Artemis-acceptor, `NAAM_FILE`-geheimen en een lokale Vault; zie [Geheimen en TLS](#geheimen-en-tls). Voor productie ontbreekt: certificaten van de CA van de organisatie (of cert-manager), rotatie van wachtwoorden en certificaten zonder het Artemis-volume te wissen, een beheerde kluis (Azure Key Vault) met audit-logging en toegang via workload identity in plaats van het lokale root-token, en TLS ook op Keycloak, Kafka en de console. |
 | **Meerdere instanties** | In één consumer group krijgt één instantie elk bericht, dus een monteur die op een andere instantie verbonden is, mist het. Oplossingen: een eigen consumer group per instantie, een pub/sub-laag (Redis, NATS) of een beheerde dienst (Azure Web PubSub, SignalR). |
 | **Inhalen na offline** | Hier opgelost met een buffer in het geheugen en `?since=`. In productie moet die buffer gedeeld en duurzaam zijn (Redis, database of opnieuw lezen uit Kafka), en hoort er een volgnummer per monteur in plaats van een tijdstip. |
 | **Reconnect-storm** | Na een herstart of uitrol verbinden alle clients tegelijk opnieuw. Wachttijd met willekeurige vertraging (de app doet dit al) en gecontroleerd afbouwen van verbindingen bij het uitrollen helpen. |
@@ -586,6 +628,8 @@ Dezelfde applicatie draait ook op Kubernetes. De manifests staan in `k8s/`. Ze z
 | `nginx.conf` en HTML als gemounte bestanden | twee `ConfigMap`s, aangemaakt door `deploy.sh` |
 | Keycloak met `admin/admin` en het realm-bestand | een `Deployment` (`60-keycloak.yaml`); het realm in een `ConfigMap`, het beheerwachtwoord in een `Secret` dat `deploy.sh` willekeurig aanmaakt |
 | `build:` | de image wordt in Azure Container Registry (ACR) gebouwd en uit die registry gehaald |
+| Docker-secrets uit `secrets/` (gevuld door Vault), `NAAM_FILE` | Kubernetes-Secrets als projected volume onder `/run/secrets` (zelfde `NAAM_FILE`); standaard door `deploy.sh` willekeurig aangemaakt, of uit Azure Key Vault met `KEYVAULT_NAME=...` (`70-secrets-keyvault.yaml`, niet op een cluster getest) |
+| TLS-keystore uit `scripts/maak-certs.sh` | Secret `artemis-tls` (`broker.p12`, `ca.pem`, `keystore-password`), door `deploy.sh` aangemaakt met hetzelfde script; voor productie cert-manager |
 
 ### Stap 1: voorbereiding
 

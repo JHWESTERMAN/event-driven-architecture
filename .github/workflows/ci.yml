@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Lezen is genoeg: de workflow publiceert niets.
+permissions:
+  contents: read
+
+# Een nieuwe push op dezelfde branch annuleert de run die nog loopt.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Tests (${{ matrix.component }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [contracts, source-adapter, target-adapter, werkorder-api]
+    defaults:
+      run:
+        working-directory: ${{ matrix.component }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # werkorder-api eist >= 22.13 (node:sqlite); de Dockerfiles gebruiken node:22.
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ${{ matrix.component }}/package-lock.json
+      - run: npm ci
+      - run: npm test
+
+  scripts:
+    name: Shellscripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntaxcontrole (bash -n)
+        run: |
+          set -e
+          for f in scripts/*.sh artemis/*.sh k8s/*.sh; do
+            echo "bash -n $f"
+            bash -n "$f"
+          done
+      - name: shellcheck
+        # shellcheck staat op ubuntu-latest; alleen fouten laten falen.
+        run: shellcheck --severity=error scripts/*.sh artemis/*.sh k8s/*.sh
+
+  geen-geheimen:
+    name: Geen geheimen in git
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          bad=$(git ls-files | grep -E '(^|/)(\.env|secrets/.*|.*\.p12|.*\.key|.*\.jks)$' || true)
+          if [ -n "$bad" ]; then
+            echo "::error::Gevoelige bestanden staan in git:"
+            echo "$bad"
+            exit 1
+          fi
+
+  images:
+    name: Image bouwen (${{ matrix.naam }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # De adapters hebben de schema's uit contracts/ nodig: context is de repo-root.
+          - { naam: source-adapter, context: ., dockerfile: source-adapter/Dockerfile }
+          - { naam: target-adapter, context: ., dockerfile: target-adapter/Dockerfile }
+          - { naam: werkorder-api, context: werkorder-api, dockerfile: werkorder-api/Dockerfile }
+          - { naam: bron-app, context: bron-app, dockerfile: bron-app/Dockerfile }
+          - { naam: microservice, context: microservice, dockerfile: microservice/Dockerfile }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      # Alleen bouwen, niet pushen: controleert dat Dockerfile en lockfile kloppen.
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: false
+          cache-from: type=gha,scope=${{ matrix.naam }}
+          cache-to: type=gha,scope=${{ matrix.naam }},mode=max
+
+  compose:
+    name: Compose-configuratie
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      # Compose controleert de secret-bestanden niet bij `config`, maar lege
+      # bestanden maken de check onafhankelijk van die aanname.
+      - run: |
+          mkdir -p secrets/tls
+          touch secrets/artemis_{admin,source,target,keystore}_password \
+                secrets/keycloak_admin_password secrets/target_adapter_client_secret \
+                secrets/tls/{ca.pem,broker.p12}
+          docker compose --profile kluis config --quiet

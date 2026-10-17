@@ -102,13 +102,25 @@ services:
     image: quay.io/keycloak/keycloak:26.0.7
     container_name: keycloak
     restart: unless-stopped
-    command: start-dev --import-realm
+    # Keycloak kent geen NAAM_FILE. Daarom leest dit opstartscript de twee geheimen uit /run/secrets en zet ze alleen in de omgeving van
+    # het Keycloak-proces zelf (niet in de containerdefinitie, dus niet in `docker inspect`). Het client-secret komt via ${...} in het
+    # realm-bestand terecht (client target-adapter); het beheerwachtwoord is het bootstrap-wachtwoord van de admin-gebruiker.
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        export KC_BOOTSTRAP_ADMIN_PASSWORD="$$(cat /run/secrets/keycloak_admin_password)"
+        export TARGET_ADAPTER_CLIENT_SECRET="$$(cat /run/secrets/target_adapter_client_secret)"
+        exec /opt/keycloak/bin/kc.sh "$$@"
+      - --
+    command: ["start-dev", "--import-realm"]
+    secrets:
+      - keycloak_admin_password
+      - target_adapter_client_secret
     environment:
-      KC_BOOTSTRAP_ADMIN_USERNAME: admin
-      KC_BOOTSTRAP_ADMIN_PASSWORD: admin          # alleen lokaal; het beheerscherm is niet van buiten bereikbaar
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin          # het beheerscherm is niet van buiten bereikbaar
       KC_HOSTNAME: http://localhost:8180          # de URL waarmee de BROWSER bij Keycloak komt (= "iss" in de tokens)
       JAVA_OPTS_KC_HEAP: "-Xms64m -Xmx512m"       # houdt het geheugengebruik laag
-      TARGET_ADAPTER_CLIENT_SECRET: ${TARGET_ADAPTER_CLIENT_SECRET:-target-adapter-dev-secret}   # komt via ${...} in het realm-bestand terecht
     healthcheck:                                  # poort open = realm is geïmporteerd (de import gebeurt vóór het luisteren)
       test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/8080' || exit 1"]
       interval: 10s
@@ -128,6 +140,8 @@ services:
   # ---------------------------------------------------------------
   # Zet vóór de eerste start de broker-configuratie en de gebruikers/rollen in het volume (etc-override). Artemis leest die map
   # alleen bij het AANMAKEN van de instance: na een wijziging dus `docker compose down -v` (zie artemis/README.md).
+  # Wachtwoorden en het keystore-wachtwoord komen als bestand uit de kluis (secrets/, zie scripts/kluis.sh); de TLS-keystore uit
+  # scripts/maak-certs.sh. Gebruikersnamen zijn geen geheim en blijven gewone instellingen.
   #   artemis      beheerder (console, rooktest)       rol amq
   #   source-adapter                                   rol eam-source: alleen versturen naar eam.workorder.v1
   #   target-adapter                                   rol eam-target: ontvangen van eam.workorder.v1, versturen naar de .dlq
@@ -135,12 +149,20 @@ services:
     image: alpine:3.20
     container_name: artemis-init
     environment:
-      ADMIN_USER: ${ARTEMIS_USER:-artemis}
-      ADMIN_PASSWORD: ${ARTEMIS_PASSWORD:-artemis}
+      ADMIN_USER: artemis
+      ADMIN_PASSWORD_FILE: /run/secrets/artemis_admin_password
       SOURCE_USER: ${SOURCE_ADAPTER_BROKER_USER:-source-adapter}
-      SOURCE_PASSWORD: ${SOURCE_ADAPTER_BROKER_PASSWORD:-source-adapter-dev}
+      SOURCE_PASSWORD_FILE: /run/secrets/artemis_source_password
       TARGET_USER: ${TARGET_ADAPTER_BROKER_USER:-target-adapter}
-      TARGET_PASSWORD: ${TARGET_ADAPTER_BROKER_PASSWORD:-target-adapter-dev}
+      TARGET_PASSWORD_FILE: /run/secrets/artemis_target_password
+      KEYSTORE_PASSWORD_FILE: /run/secrets/artemis_keystore_password
+      TLS_KEYSTORE: /run/secrets/artemis_keystore
+    secrets:
+      - artemis_admin_password
+      - artemis_source_password
+      - artemis_target_password
+      - artemis_keystore_password
+      - artemis_keystore
     volumes:
       - artemis-data:/inst
       - ./artemis/etc-override/broker.xml:/src/broker.xml:ro
@@ -155,13 +177,16 @@ services:
       artemis-init:
         condition: service_completed_successfully
     environment:
-      ARTEMIS_USER: ${ARTEMIS_USER:-artemis}
-      ARTEMIS_PASSWORD: ${ARTEMIS_PASSWORD:-artemis}      # alleen lokaal; in k8s komt dit uit een Secret
+      # De image maakt bij het aanmaken van de instance één gebruiker uit deze twee variabelen. Die gebruiker bestaat daarna niet meer:
+      # artemis-users.properties uit etc-override (artemis-init, met de wachtwoorden uit de kluis) vervangt het bestand. Daarom is dit
+      # een bewust waardeloze opstartgebruiker en geen echt wachtwoord; de rooktest controleert dat hij niet kan inloggen.
+      ARTEMIS_USER: bootstrap
+      ARTEMIS_PASSWORD: bootstrap
       EXTRA_ARGS: "--http-host 0.0.0.0 --relax-jolokia --java-memory 512M"   # standaardwaarde plus een kleinere heap
     volumes:
       - artemis-data:/var/lib/artemis-instance
     ports:
-      - "127.0.0.1:61616:61616"    # CORE en AMQP 1.0
+      - "127.0.0.1:61616:61616"    # CORE en AMQP 1.0, alleen via TLS
       - "127.0.0.1:8161:8161"      # webconsole
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/61616' || exit 1"]
@@ -187,7 +212,11 @@ services:
       BROKER_PORT: 61616
       BROKER_QUEUE: eam.workorder.v1
       BROKER_USER: ${SOURCE_ADAPTER_BROKER_USER:-source-adapter}
-      BROKER_PASSWORD: ${SOURCE_ADAPTER_BROKER_PASSWORD:-source-adapter-dev}
+      BROKER_PASSWORD_FILE: /run/secrets/artemis_source_password
+      BROKER_TLS_CA: /run/secrets/broker_ca            # de adapter vertrouwt alleen deze CA en controleert de hostnaam (artemis)
+    secrets:
+      - artemis_source_password
+      - broker_ca
     depends_on:
       artemis:
         condition: service_healthy
@@ -217,12 +246,17 @@ services:
       BROKER_QUEUE: eam.workorder.v1
       BROKER_DLQ: eam.workorder.v1.dlq
       BROKER_USER: ${TARGET_ADAPTER_BROKER_USER:-target-adapter}
-      BROKER_PASSWORD: ${TARGET_ADAPTER_BROKER_PASSWORD:-target-adapter-dev}
+      BROKER_PASSWORD_FILE: /run/secrets/artemis_target_password
+      BROKER_TLS_CA: /run/secrets/broker_ca
       API_URL: http://werkorder-api:8081
       # Inloggen als service-account (client credentials). Het token bevat de rol die /intern vraagt.
       OIDC_TOKEN_URL: http://keycloak:8080/realms/werkorders/protocol/openid-connect/token
       OIDC_CLIENT_ID: target-adapter
-      OIDC_CLIENT_SECRET: ${TARGET_ADAPTER_CLIENT_SECRET:-target-adapter-dev-secret}
+      OIDC_CLIENT_SECRET_FILE: /run/secrets/target_adapter_client_secret
+    secrets:
+      - artemis_target_password
+      - target_adapter_client_secret
+      - broker_ca
     depends_on:
       artemis:
         condition: service_healthy
@@ -258,7 +292,47 @@ services:
       - "127.0.0.1:8095:8095"
     mem_limit: 128m
 
+  # ---------------------------------------------------------------
+  # Lokale kluis (HashiCorp Vault) voor de wachtwoorden. Alleen met het profiel "kluis" en alleen via scripts/kluis.sh; de rest van de
+  # omgeving draait ook zonder dat deze service aan staat (de geheimen staan dan als bestand onder secrets/).
+  # Opslag op een volume; de kluis start verzegeld en wordt door ./scripts/kluis.sh ontgrendeld. Alleen bereikbaar vanaf deze computer.
+  # ---------------------------------------------------------------
+  vault:
+    image: hashicorp/vault:1.18
+    container_name: vault
+    profiles: ["kluis"]
+    restart: unless-stopped
+    command: ["server"]
+    environment:
+      VAULT_LOCAL_CONFIG: '{"storage":{"file":{"path":"/vault/file"}},"listener":[{"tcp":{"address":"0.0.0.0:8200","tls_disable":true}}],"ui":true,"disable_mlock":true}'
+    volumes:
+      - vault-data:/vault/file
+    ports:
+      - "127.0.0.1:8200:8200"
+    mem_limit: 256m
+
+# Docker-secrets uit bestanden: de bestanden maakt scripts/kluis.sh (geheimen uit Vault) en scripts/maak-certs.sh (TLS). Ze verschijnen in
+# de containers onder /run/secrets/<naam>. Ontbreekt er een, dan weigert `docker compose up`; draai dan eerst ./scripts/kluis.sh klaarzetten.
+secrets:
+  artemis_admin_password:
+    file: ./secrets/artemis_admin_password
+  artemis_source_password:
+    file: ./secrets/artemis_source_password
+  artemis_target_password:
+    file: ./secrets/artemis_target_password
+  artemis_keystore_password:
+    file: ./secrets/artemis_keystore_password
+  artemis_keystore:
+    file: ./secrets/tls/broker.p12
+  broker_ca:
+    file: ./secrets/tls/ca.pem
+  keycloak_admin_password:
+    file: ./secrets/keycloak_admin_password
+  target_adapter_client_secret:
+    file: ./secrets/target_adapter_client_secret
+
 volumes:
+  vault-data:
   redpanda-data:
   artemis-data:
   werkorder-data:

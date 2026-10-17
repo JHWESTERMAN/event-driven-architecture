@@ -12,7 +12,12 @@ cd "$(dirname "$0")/.."
 
 VOLLEDIG=0; [ "${1:-}" = "--volledig" ] && VOLLEDIG=1
 [ -f .env ] && { set -a; . ./.env; set +a; }
-ARTEMIS_USER="${ARTEMIS_USER:-artemis}"; ARTEMIS_PASSWORD="${ARTEMIS_PASSWORD:-artemis}"
+# Wachtwoorden komen uit de kluis (secrets/, zie scripts/kluis.sh), niet uit .env
+geheim() { cat "secrets/$1" 2>/dev/null; }
+ARTEMIS_USER="artemis"; ARTEMIS_PASSWORD="$(geheim artemis_admin_password)"
+if [ -z "$ARTEMIS_PASSWORD" ] || [ -z "$(geheim artemis_source_password)" ]; then
+  echo "Geen geheimen gevonden onder secrets/. Draai eerst:  ./scripts/kluis.sh klaarzetten  en start daarna Compose opnieuw." >&2; exit 1
+fi
 BRON="http://localhost:8095"
 DC="docker compose"
 OK=0; FOUT=0; TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
@@ -21,6 +26,8 @@ groen() { printf '  \033[32mOK\033[0m    %s\n' "$*"; OK=$((OK+1)); }
 rood()  { printf '  \033[31mFOUT\033[0m  %s\n' "$*"; FOUT=$((FOUT+1)); }
 info()  { printf '  \033[33mINFO\033[0m  %s\n' "$*"; }
 kop()   { printf '\n\033[1m%s\033[0m\n' "$*"; }
+# controle_is <naam> <verwacht> <werkelijk>: bij rood staat erbij wat er werkelijk uit kwam
+controle_is() { if [ "$3" = "$2" ]; then groen "$1"; else rood "$1 (verwacht '$2', kreeg '$3')"; fi; }
 controle() { local naam="$1"; shift; if "$@"; then groen "$naam"; else rood "$naam"; fi; }
 
 # JSON-veld uit stdin lezen (Node is toch al nodig voor dit project)
@@ -67,7 +74,8 @@ zet_op_queue() { # zet_op_queue <messageId> ; body op stdin
   local id="$1"
   $DC exec -T -e MID="$id" source-adapter node -e '
     const rhea=require("rhea"); const body=require("fs").readFileSync(0,"utf8");
-    const c=rhea.connect({host:process.env.BROKER_HOST,port:Number(process.env.BROKER_PORT),username:process.env.BROKER_USER,password:process.env.BROKER_PASSWORD,reconnect:false});
+    const fs=require("fs"); const T=process.env.BROKER_TLS_CA?{transport:"tls",ca:[fs.readFileSync(process.env.BROKER_TLS_CA)]}:{};
+    const c=rhea.connect({host:process.env.BROKER_HOST,port:Number(process.env.BROKER_PORT),username:process.env.BROKER_USER,password:fs.readFileSync(process.env.BROKER_PASSWORD_FILE,"utf8"),reconnect:false,...T});
     c.open_sender("eam.workorder.v1");
     c.on("sendable",x=>x.sender.send({message_id:process.env.MID,durable:true,application_properties:{workOrderId:"WO-9999"},body}));
     c.on("accepted",()=>{console.log("ok");c.close();});
@@ -85,20 +93,21 @@ api_status() { # api_status <METHOD> <pad> [token]
 service_token() { # token van het service-account, opgehaald zoals de target-adapter dat doet
   $DC exec -T target-adapter node -e '
     fetch(process.env.OIDC_TOKEN_URL,{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},
-      body:new URLSearchParams({grant_type:"client_credentials",client_id:process.env.OIDC_CLIENT_ID,client_secret:process.env.OIDC_CLIENT_SECRET})})
+      body:new URLSearchParams({grant_type:"client_credentials",client_id:process.env.OIDC_CLIENT_ID,client_secret:require("fs").readFileSync(process.env.OIDC_CLIENT_SECRET_FILE,"utf8")})})
       .then(r=>r.json()).then(j=>console.log(j.access_token||"")).catch(()=>console.log(""))' 2>/dev/null | tr -d '\r'
 }
 monteur_token() { curl -s -m 10 -d grant_type=password -d client_id=werkorders-test -d username=m-017 -d password=welkom017 \
   http://localhost:8180/realms/werkorders/protocol/openid-connect/token | jget access_token; }
 
 # Probeert als <gebruiker> te ontvangen of te versturen op eam.workorder.v1. Antwoord: ok | geweigerd
-amqp_probe() { # amqp_probe <receive|send> <gebruiker> <wachtwoord>
-  $DC exec -T -e MODUS="$1" -e U="$2" -e W="$3" source-adapter node -e '
-    const rhea=require("rhea"); let klaar=false;
+amqp_probe() { # amqp_probe <receive|send> <gebruiker> <wachtwoord> [zonder-tls]
+  $DC exec -T -e MODUS="$1" -e U="$2" -e W="$3" -e ZONDER_TLS="${4:-}" source-adapter node -e '
+    const rhea=require("rhea"); const fs=require("fs"); let klaar=false;
+    const T=(process.env.BROKER_TLS_CA&&!process.env.ZONDER_TLS)?{transport:"tls",ca:[fs.readFileSync(process.env.BROKER_TLS_CA)]}:{};
     const uit=(x)=>{ if(!klaar){klaar=true;console.log(x);process.exit(0);} };
-    const c=rhea.connect({host:process.env.BROKER_HOST,port:Number(process.env.BROKER_PORT),username:process.env.U,password:process.env.W,reconnect:false});
+    const c=rhea.connect({host:process.env.BROKER_HOST,port:Number(process.env.BROKER_PORT),username:process.env.U,password:process.env.W,reconnect:false,...T});
     for (const e of ["connection_error","receiver_error","sender_error","receiver_close","sender_close","disconnected","error","rejected","released","modified"]) c.on(e,()=>uit("geweigerd"));
-    if (process.env.MODUS==="receive") { c.open_receiver({source:{address:"eam.workorder.v1"},credit_window:0}); setTimeout(()=>uit("ok"),2500); }
+    if (process.env.MODUS==="receive") { let open=false; c.on("receiver_open",()=>{open=true}); c.open_receiver({source:{address:"eam.workorder.v1"},credit_window:0}); setTimeout(()=>uit(open?"ok":"geweigerd"),2500); }
     else { const s=c.open_sender("eam.workorder.v1"); s.on("sendable",x=>x.sender.send({durable:true,body:"{}"})); c.on("accepted",()=>uit("ok")); setTimeout(()=>uit("ok?"),4000); }
     setTimeout(()=>uit("geweigerd"),8000);' 2>/dev/null | tr -d '\r'
 }
@@ -185,12 +194,33 @@ fi
 
 # ----------------------------------------------------------------------------------------------
 kop "4c. Rechten: iedere partij kan alleen wat hij moet kunnen"
-SRC_U="${SOURCE_ADAPTER_BROKER_USER:-source-adapter}"; SRC_W="${SOURCE_ADAPTER_BROKER_PASSWORD:-source-adapter-dev}"
-TGT_U="${TARGET_ADAPTER_BROKER_USER:-target-adapter}"; TGT_W="${TARGET_ADAPTER_BROKER_PASSWORD:-target-adapter-dev}"
+SRC_U="${SOURCE_ADAPTER_BROKER_USER:-source-adapter}"; SRC_W="$(geheim artemis_source_password)"
+TGT_U="${TARGET_ADAPTER_BROKER_USER:-target-adapter}"; TGT_W="$(geheim artemis_target_password)"
 controle "Artemis: verkeerd wachtwoord wordt geweigerd" test "$(amqp_probe receive "$SRC_U" verkeerd)" = "geweigerd"
 controle "Artemis: source-adapter mag NIET ontvangen van de queue" test "$(amqp_probe receive "$SRC_U" "$SRC_W")" = "geweigerd"
 controle "Artemis: target-adapter mag NIET versturen naar de queue" test "$(amqp_probe send "$TGT_U" "$TGT_W")" = "geweigerd"
 controle "Artemis: queue is na deze pogingen nog leeg" wacht_tot 5 queue_is eam.workorder.v1 0
+
+kop "4d. Transport en geheimen: TLS naar de broker, geen wachtwoorden in de containerdefinitie"
+controle_is "Artemis: AMQP zonder TLS wordt geweigerd (ook met een goed wachtwoord)" geweigerd "$(amqp_probe receive "$TGT_U" "$TGT_W" zonder-tls)"
+controle_is "Artemis: AMQP over TLS met goede gegevens werkt (target-adapter mag ontvangen)" ok "$(amqp_probe receive "$TGT_U" "$TGT_W")"
+controle "Artemis: certificaat is geldig voor de naam artemis en getekend door onze CA" bash -c "echo | openssl s_client -connect localhost:61616 -CAfile secrets/tls/ca.pem -verify_hostname artemis 2>&1 | grep -q 'Verify return code: 0'"
+controle "Artemis: certificaat past niet bij een andere naam (hostnamecontrole werkt)" bash -c "! (echo | openssl s_client -connect localhost:61616 -CAfile secrets/tls/ca.pem -verify_hostname andere.example 2>&1 | grep -q 'Verify return code: 0')"
+jolokia_code() { curl -s -m 5 -o /dev/null -w '%{http_code}' -u "$1:$2" -H 'Origin: http://localhost' http://localhost:8161/console/jolokia/version; }
+controle_is "Artemis: console werkt met de beheerder uit de kluis" 200 "$(jolokia_code "$ARTEMIS_USER" "$ARTEMIS_PASSWORD")"
+BOOT="$(jolokia_code bootstrap bootstrap)"
+controle "Artemis: console weigert de opstartgebruiker (alleen etc-override telt) (kreeg HTTP $BOOT)" test "$BOOT" != 200 -a "$BOOT" != 000
+geen_geheim_in_omgeving() {
+  local w c
+  for f in artemis_admin_password artemis_source_password artemis_target_password artemis_keystore_password keycloak_admin_password target_adapter_client_secret; do
+    w="$(geheim "$f")"; [ -n "$w" ] || return 1
+    for c in artemis-init artemis source-adapter target-adapter keycloak; do
+      docker inspect "$c" 2>/dev/null | grep -qF "$w" && { echo "    $f staat in docker inspect $c" >&2; return 1; }
+    done
+  done
+  return 0
+}
+controle "geen enkel geheim uit de kluis staat in docker inspect van artemis, adapters of Keycloak" geen_geheim_in_omgeving
 SVC="$(service_token)"; MON="$(monteur_token)"
 if [ -z "$SVC" ]; then rood "geen service-token van Keycloak gekregen (staat target-adapter in het realm? Keycloak opnieuw aanmaken: docker compose up -d --force-recreate keycloak)"; fi
 [ -n "$SVC" ] && [ -n "$MON" ] || info "geen tokens: API-rechtencontroles worden overgeslagen"
