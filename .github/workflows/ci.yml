@@ -4,6 +4,7 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
 
 # Lezen is genoeg: de workflow publiceert niets.
 permissions:
@@ -108,3 +109,29 @@ jobs:
                 secrets/keycloak_admin_password secrets/target_adapter_client_secret \
                 secrets/tls/{ca.pem,broker.p12}
           docker compose --profile kluis config --quiet
+
+  rooktest:
+    name: Rooktest (hele keten)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Geheimen en certificaten klaarzetten (Vault, secrets/, TLS)
+        run: |
+          cp .env.example .env
+          ./scripts/kluis.sh klaarzetten
+      - name: Stack bouwen en starten
+        run: docker compose up -d --build
+      - name: Rooktest (--volledig)
+        run: ./scripts/smoketest.sh --volledig
+      - name: Logs bij een fout
+        if: failure()
+        run: |
+          docker compose ps -a
+          docker compose logs --no-color --tail 200
+      - name: Opruimen
+        if: always()
+        run: docker compose --profile kluis down -v
