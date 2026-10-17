@@ -2,57 +2,18 @@ const http = require('http');
 
 const PORT = process.env.PORT || 8081;
 
-// ---------------------------------------------------------------
-// Voorbeelddata (in een echte situatie komt dit uit het werkordersysteem)
-// De werkorder is de "volledige" versie; het Kafka-event bevat alleen id, status en bericht.
-// Let op: "taken" en "materiaal" zijn lijsten (kardinaliteit 0..*)
-// ---------------------------------------------------------------
-const WERKORDERS = {
-  'WO-1001': {
-    werkorderId: 'WO-1001',
-    status: 'OPEN',
-    prioriteit: 'HOOG',
-    omschrijving: 'Storing wissel 214, wisselmotor reageert niet',
-    locatie: { plaats: 'Breda', spoorEmplacement: 'Breda Noord', coordinaten: { lat: 51.6, lon: 4.78 } },
-    monteur: { id: 'M-017', naam: 'J. de Vries' },
-    aangemaaktOp: '2026-10-16T06:12:00Z',
-    taken: [
-      { taakId: 'T-1', omschrijving: 'Wissel veiligstellen', gereed: true },
-      { taakId: 'T-2', omschrijving: 'Wisselmotor controleren', gereed: false },
-      { taakId: 'T-3', omschrijving: 'Rapport invullen', gereed: false }
-    ],
-    materiaal: [
-      { artikelnr: 'WM-204', omschrijving: 'Wisselmotor 220V', aantal: 1 }
-    ]
-  },
-  'WO-1002': {
-    werkorderId: 'WO-1002',
-    status: 'IN_BEHANDELING',
-    prioriteit: 'NORMAAL',
-    omschrijving: 'Seinlamp vervangen',
-    locatie: { plaats: 'Tilburg', spoorEmplacement: 'Tilburg West', coordinaten: { lat: 51.56, lon: 5.08 } },
-    monteur: { id: 'M-017', naam: 'J. de Vries' },
-    aangemaaktOp: '2026-10-16T07:40:00Z',
-    taken: [
-      { taakId: 'T-1', omschrijving: 'Lamp vervangen', gereed: false }
-    ],
-    materiaal: []
-  },
-  'WO-1003': {
-    werkorderId: 'WO-1003',
-    status: 'AFGEROND',
-    prioriteit: 'LAAG',
-    omschrijving: 'Jaarlijkse inspectie overweg',
-    locatie: { plaats: 'Eindhoven', spoorEmplacement: 'Eindhoven Zuid', coordinaten: { lat: 51.43, lon: 5.48 } },
-    monteur: { id: 'M-022', naam: 'S. Jansen' },
-    aangemaaktOp: '2026-10-15T13:05:00Z',
-    taken: [
-      { taakId: 'T-1', omschrijving: 'Inspectie uitvoeren', gereed: true },
-      { taakId: 'T-2', omschrijving: 'Rapport indienen', gereed: true }
-    ],
-    materiaal: []
-  }
-};
+const { maakStore } = require('./db');
+const { valideerPut } = require('./intern');
+const { maakRelay } = require('./outbox');
+const { WERKORDERS: SEED } = require('./seed');
+const crypto = require('crypto');
+
+// Opslag: SQLite. In Compose staat het bestand op een volume (/data); ':memory:' gebruiken we in tests.
+const DB_PATH = process.env.DB_PATH || './data/werkorders.db';
+if (DB_PATH !== ':memory:') require('fs').mkdirSync(require('path').dirname(DB_PATH), { recursive: true });
+const store = maakStore({ pad: DB_PATH, seed: SEED });
+const INTERN_API_KEY = process.env.INTERN_API_KEY || '';
+const MAX_BODY = 256 * 1024;
 
 const TOEGESTANE_STATUSSEN = ['OPEN', 'IN_BEHANDELING', 'AFGEROND'];
 const ID_PATROON = /^WO-\d+$/;
@@ -67,7 +28,6 @@ const ID_PATROON = /^WO-\d+$/;
 //   - het monteur-id komt uit de gebruikersnaam in het token (M-017 staat in Keycloak als m-017)
 // Het token wordt hier nooit gelogd.
 // ===============================================================
-const crypto = require('crypto');
 
 if (typeof fetch !== 'function') {
   console.error('Deze service heeft Node.js 18 of hoger nodig (fetch ontbreekt)');
@@ -276,6 +236,68 @@ async function authenticeer(req, res) {
   }
 }
 
+
+// ---------------------------------------------------------------
+// Interne schrijf-API
+//   PUT /intern/werkorders/{id}   header X-Api-Key; body: zie intern.js en openapi.yaml
+// Beveiliging: gedeelde sleutel (PoC). In productie: service-account via Keycloak (client credentials) of mTLS.
+// ---------------------------------------------------------------
+function sleutelKlopt(req) {
+  const gegeven = Buffer.from(String(req.headers['x-api-key'] || ''));
+  const verwacht = Buffer.from(INTERN_API_KEY);
+  return gegeven.length === verwacht.length && crypto.timingSafeEqual(gegeven, verwacht);
+}
+
+function leesBody(req) {
+  return new Promise((resolve, reject) => {
+    const delen = []; let n = 0;
+    req.on('data', (d) => {
+      n += d.length;
+      if (n > MAX_BODY) { reject(Object.assign(new Error('te groot'), { status: 413 })); req.destroy(); return; }
+      delen.push(d);
+    });
+    req.on('end', () => resolve(Buffer.concat(delen).toString('utf8')));
+    req.on('error', reject);
+  });
+}
+
+async function verwerkIntern(req, res, pad) {
+  if (!INTERN_API_KEY) {
+    return stuurFout(res, 503, 'Service Unavailable', 'De interne API is niet geconfigureerd (INTERN_API_KEY ontbreekt)');
+  }
+  if (!sleutelKlopt(req)) {
+    return stuurFout(res, 401, 'Unauthorized', 'Ongeldige of ontbrekende API-sleutel');
+  }
+  const m = pad.match(/^\/intern\/werkorders\/([^/]+)$/);
+  if (!m) return stuurFout(res, 404, 'Not Found', `Onbekend pad: ${pad}`);
+  if (req.method !== 'PUT') return stuurFout(res, 405, 'Method Not Allowed', `${req.method} wordt niet ondersteund`, { Allow: 'PUT' });
+
+  let id;
+  try { id = decodeURIComponent(m[1]); } catch (e) { return stuurFout(res, 400, 'Bad Request', 'Ongeldig id (verkeerde codering)'); }
+  if (!ID_PATROON.test(id)) return stuurFout(res, 400, 'Bad Request', `Ongeldig id '${id}'`);
+
+  if (!/^application\/json\b/i.test(req.headers['content-type'] || '')) {
+    return stuurFout(res, 415, 'Unsupported Media Type', 'Content-Type moet application/json zijn');
+  }
+  let tekst;
+  try { tekst = await leesBody(req); } catch (e) {
+    return stuurFout(res, e.status || 400, e.status === 413 ? 'Payload Too Large' : 'Bad Request', 'Body kon niet worden gelezen');
+  }
+  let body;
+  try { body = JSON.parse(tekst); } catch (e) { return stuurFout(res, 400, 'Bad Request', 'Body is geen geldige JSON'); }
+
+  const { fouten, invoer } = valideerPut(id, body);
+  if (fouten.length) {
+    return stuurJson(res, 422, { status: 422, title: 'Unprocessable Entity', detail: 'De werkorder voldoet niet aan het contract', fouten });
+  }
+  const r = store.verwerk(invoer);
+  console.log(JSON.stringify({
+    niveau: 'info', stap: 'opslaan', werkorderId: id, messageId: invoer.messageId, correlationId: invoer.correlationId || null,
+    versie: invoer.versie, resultaat: r.resultaat, reden: r.reden || undefined
+  }));
+  return stuurJson(res, 200, r);
+}
+
 // ---------------------------------------------------------------
 // Routes
 //   GET /health                      (zonder token)
@@ -286,13 +308,17 @@ async function verwerk(req, res) {
   const url = new URL(req.url, 'http://localhost');
   const pad = url.pathname.length > 1 ? url.pathname.replace(/\/+$/, '') : url.pathname;
 
+  // Interne schrijf-API (alleen voor de target-adapter; de gateway stuurt /intern niet door)
+  if (pad.startsWith('/intern/')) return verwerkIntern(req, res, pad);
+
   if (req.method !== 'GET') {
     return stuurFout(res, 405, 'Method Not Allowed', `${req.method} wordt niet ondersteund`, { Allow: 'GET' });
   }
 
   // Gezondheidscheck: bewust zonder token, zodat Kubernetes en Docker hem kunnen gebruiken
   if (pad === '/health') {
-    return stuurJson(res, 200, { status: 'UP' });
+    const relayStatus = relay ? relay.status() : null;
+    return stuurJson(res, 200, { status: 'UP', outbox: relayStatus });
   }
 
   if (pad !== '/api' && !pad.startsWith('/api/')) {
@@ -323,7 +349,7 @@ async function verwerk(req, res) {
     }
 
     // Je ziet alleen je eigen werkorders, ook in de lijst
-    let resultaat = Object.values(WERKORDERS).filter((w) => w.monteur.id === gebruiker.monteurId);
+    let resultaat = store.lijstVan(gebruiker.monteurId);
     if (status !== null) {
       resultaat = resultaat.filter((w) => w.status === status);
     }
@@ -333,7 +359,8 @@ async function verwerk(req, res) {
       werkorderId: w.werkorderId,
       status: w.status,
       prioriteit: w.prioriteit,
-      omschrijving: w.omschrijving
+      omschrijving: w.omschrijving,
+      ingetrokken: w.ingetrokken
     }));
 
     return stuurJson(res, 200, { totaal: resultaat.length, items }, { 'Cache-Control': 'no-store' });
@@ -353,15 +380,15 @@ async function verwerk(req, res) {
       return stuurFout(res, 400, 'Bad Request', `Ongeldig id '${id}' (verwacht: WO- gevolgd door cijfers)`);
     }
 
-    const werkorder = WERKORDERS[id];
+    const werkorder = store.haal(id);
     if (!werkorder) {
       return stuurFout(res, 404, 'Not Found', `Werkorder ${id} bestaat niet`);
     }
 
     // De eigenaarscheck: een geldig token is niet genoeg, de werkorder moet ook bij deze monteur horen.
     // Dit is de controle die voorkomt dat je andermans werkorders kunt lezen door een id te raden.
-    if (werkorder.monteur.id !== gebruiker.monteurId) {
-      console.warn(`Toegang geweigerd: ${gebruiker.monteurId} vroeg ${id} op (eigenaar: ${werkorder.monteur.id})`);
+    if (!werkorder.monteur || werkorder.monteur.id !== gebruiker.monteurId) {
+      console.warn(`Toegang geweigerd: ${gebruiker.monteurId} vroeg ${id} op (eigenaar: ${werkorder.monteur ? werkorder.monteur.id : 'niemand'})`);
       return stuurFout(res, 403, 'Forbidden', `Je hebt geen toegang tot werkorder ${id}`);
     }
 
@@ -389,6 +416,29 @@ const server = http.createServer((req, res) => {
   });
 });
 
-server.listen(PORT, () => {
-  console.log(`Werkorder-API gestart op poort ${PORT} (uitgever: ${OIDC_ISSUER}, doelgroep: ${OIDC_AUDIENCE})`);
-});
+// Outbox-relay: alleen als er een Kafka-broker is ingesteld (anders blijven events in de outbox staan)
+let relay = null;
+let publisher = null;
+if (process.env.KAFKA_BROKER) {
+  const { maakKafkaPublisher } = require('./publisher');
+  publisher = maakKafkaPublisher({ broker: process.env.KAFKA_BROKER });
+  relay = maakRelay({ store, publiceer: (b) => publisher.publiceer(b), interval: Number(process.env.OUTBOX_INTERVAL_MS || 1000) });
+  relay.start();
+}
+
+if (require.main === module) {
+  server.listen(PORT, () => {
+    console.log(`Werkorder-API gestart op poort ${PORT} (uitgever: ${OIDC_ISSUER}, doelgroep: ${OIDC_AUDIENCE}, database: ${DB_PATH}, outbox-relay: ${relay ? 'aan' : 'uit'})`);
+  });
+  const stop = async () => {
+    if (relay) relay.stop();
+    server.close();
+    if (publisher) await publisher.sluit();
+    store.sluit();
+    process.exit(0);
+  };
+  process.on('SIGTERM', stop);
+  process.on('SIGINT', stop);
+}
+
+module.exports = { server, store };

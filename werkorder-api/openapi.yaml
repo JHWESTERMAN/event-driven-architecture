@@ -29,6 +29,10 @@ tags:
     description: Werkorders ophalen
   - name: Beheer
     description: Gezondheidscontrole
+  - name: Intern
+    description: |
+      Schrijf-API voor de target-adapter. Niet bedoeld voor de monteursapp en niet bereikbaar via de gateway
+      (die stuurt alleen `/ws` en `/api/` door).
 
 paths:
   /api/werkorders:
@@ -116,6 +120,73 @@ paths:
         '503':
           $ref: '#/components/responses/TijdelijkNietBeschikbaar'
 
+  /intern/werkorders/{werkorderId}:
+    put:
+      tags: [Intern]
+      operationId: werkorderOpslaan
+      summary: Werkorder aanmaken, bijwerken of intrekken (alleen target-adapter)
+      description: |
+        Idempotent op `versie`: een bericht met een versie die niet hoger is dan de opgeslagen versie
+        wordt genegeerd (`GENEGEERD`) en geeft toch `200`, zodat de adapter het bericht kan bevestigen.
+        Een intrekking voor een nog onbekende werkorder wordt bewaard als tombstone (`TOMBSTONE_BEWAARD`);
+        een latere, lagere versie wordt daarna genegeerd.
+
+        Bij een wijziging schrijft de API in dezelfde database-transactie de bijbehorende events in de
+        outbox (topics `werkorder-events` en `werkorder-notificaties`). Een versie-ophoging zonder
+        inhoudelijke wijziging maakt geen events.
+
+        Beveiliging in de PoC: gedeelde sleutel in `X-Api-Key`. Voor productie: service-account
+        (client credentials) via Keycloak of mTLS.
+      security:
+        - internApiKey: []
+      parameters:
+        - name: werkorderId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^WO-[0-9]+$'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InternOpslaan'
+      responses:
+        '200':
+          description: Verwerkt, genegeerd (oude versie) of als tombstone bewaard.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternResultaat'
+        '400':
+          $ref: '#/components/responses/OngeldigVerzoek'
+        '401':
+          description: Ontbrekende of ongeldige API-sleutel.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Probleem'
+        '413':
+          description: Body groter dan 256 KiB.
+        '415':
+          description: Content-Type is niet application/json.
+        '422':
+          description: De werkorder voldoet niet aan het contract. Permanente fout, opnieuw proberen helpt niet.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: integer }
+                  title: { type: string }
+                  detail: { type: string }
+                  fouten:
+                    type: array
+                    items: { type: string }
+        '503':
+          description: INTERN_API_KEY is niet ingesteld op de server.
+
   /health:
     get:
       tags: [Beheer]
@@ -138,6 +209,11 @@ paths:
 
 components:
   securitySchemes:
+    internApiKey:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+      description: Gedeelde sleutel tussen target-adapter en werkorder-api (alleen PoC).
     bearerAuth:
       type: http
       scheme: bearer
@@ -236,7 +312,7 @@ components:
 
     Locatie:
       type: object
-      required: [plaats, spoorEmplacement, coordinaten]
+      required: [plaats, spoorEmplacement]
       properties:
         plaats:
           type: string
@@ -287,7 +363,6 @@ components:
         - prioriteit
         - omschrijving
         - locatie
-        - monteur
         - aangemaaktOp
         - taken
         - materiaal
@@ -305,8 +380,24 @@ components:
         locatie:
           $ref: '#/components/schemas/Locatie'
         monteur:
-          $ref: '#/components/schemas/Monteur'
+          allOf:
+            - $ref: '#/components/schemas/Monteur'
+          nullable: true
+          description: Ontbreekt of is null zolang de werkorder niet is toegewezen (alleen bij status OPEN). Via GET /api alleen zichtbaar voor de eigen monteur.
         aangemaaktOp:
+          type: string
+          format: date-time
+        versie:
+          type: integer
+          minimum: 1
+          description: Versie uit de bron; wordt alleen hoger.
+        ingetrokken:
+          type: boolean
+          description: "true als de bron de werkorder heeft ingetrokken. De status is dan AFGEROND (het monteur-model kent geen CANCELLED)."
+        redenIntrekking:
+          type: string
+          nullable: true
+        bijgewerktOp:
           type: string
           format: date-time
         taken:
@@ -332,6 +423,44 @@ components:
         prioriteit:
           $ref: '#/components/schemas/Prioriteit'
         omschrijving:
+          type: string
+        ingetrokken:
+          type: boolean
+
+    InternOpslaan:
+      type: object
+      additionalProperties: false
+      required: [messageId, versie]
+      properties:
+        messageId:
+          type: string
+          description: messageId van het canonieke bericht (voor traceerbaarheid).
+        correlationId:
+          type: string
+        versie:
+          type: integer
+          minimum: 1
+        ingetrokken:
+          type: boolean
+          default: false
+        reden:
+          type: string
+          description: Alleen bij een intrekking (DUPLICATE, ERRONEOUS, OBSOLETE, OTHER).
+        werkorder:
+          description: Verplicht bij aanmaken/wijzigen, verboden bij een intrekking. `werkorderId` moet gelijk zijn aan het pad.
+          allOf:
+            - $ref: '#/components/schemas/Werkorder'
+
+    InternResultaat:
+      type: object
+      required: [resultaat, versie]
+      properties:
+        resultaat:
+          type: string
+          enum: [VERWERKT, GENEGEERD, TOMBSTONE_BEWAARD]
+        versie:
+          type: integer
+        reden:
           type: string
 
     WerkorderLijst:
