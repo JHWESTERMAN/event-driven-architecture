@@ -1,0 +1,9 @@
+{
+  "name": "bron-app",
+  "version": "1.0.0",
+  "description": "Simulator van het bronsysteem OMS: bouwt werkopdrachten in de bron-interface en stuurt ze naar de source-adapter",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  }
+}
