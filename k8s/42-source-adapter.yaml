@@ -39,10 +39,10 @@ spec:
               value: eam.workorder.v1
             - name: BROKER_USER
               valueFrom:
-                secretKeyRef: { name: artemis-credentials, key: user }
+                secretKeyRef: { name: artemis-adapter-credentials, key: source-user }
             - name: BROKER_PASSWORD
               valueFrom:
-                secretKeyRef: { name: artemis-credentials, key: password }
+                secretKeyRef: { name: artemis-adapter-credentials, key: source-password }
           resources:
             requests:
               cpu: 25m

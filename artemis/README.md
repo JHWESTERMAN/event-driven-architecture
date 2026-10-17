@@ -33,6 +33,18 @@ dus opnieuw worden aangemaakt. Dat wist de berichten in de broker (voor de PoC p
 docker compose rm -sf artemis && docker volume rm $(docker volume ls -q | grep artemis-data) && docker compose up -d artemis
 ```
 
+## Gebruikers en rechten
+
+| Gebruiker | Rol | Mag |
+|---|---|---|
+| `ARTEMIS_USER` (console, rooktest) | `amq` | alles |
+| `SOURCE_ADAPTER_BROKER_USER` | `eam-source` | alleen versturen naar `eam.workorder.v1` |
+| `TARGET_ADAPTER_BROKER_USER` | `eam-target` | ontvangen van `eam.workorder.v1`, versturen naar `eam.workorder.v1.dlq` |
+
+`init-users.sh` schrijft de gebruikers en rollen (en kopieert `broker.xml`) naar `etc-override` in het volume. In Compose doet de
+service `artemis-init` dat vóór Artemis start, in k8s een initContainer. Zoals altijd leest Artemis die map alleen bij het aanmaken van de instance:
+bij wijzigingen `docker compose down -v` (of het StatefulSet en de PVC verwijderen). De rooktest (stap 4c) controleert de rechten.
+
 ## Status van deze configuratie
 
 Het bestand is afgeleid van het standaard `broker.xml` van Artemis en is getest met `scripts/smoketest.sh --volledig` tegen Artemis 2.57.0

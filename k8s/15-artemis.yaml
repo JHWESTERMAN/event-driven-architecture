@@ -2,7 +2,10 @@
 # De broker-configuratie (queue, dead letter address, herlevering) komt uit de ConfigMap artemis-etc-override,
 # die deploy.sh maakt uit artemis/etc-override/. Let op: Artemis leest die map alleen bij het AANMAKEN van de instance.
 # Na een wijziging van broker.xml dus: StatefulSet en PVC verwijderen (zie artemis/README.md).
-# Gebruikersnaam en wachtwoord: Secret artemis-credentials (door deploy.sh aangemaakt, nooit in git).
+# Gebruikers en rollen: de initContainer draait artemis/init-users.sh en zet broker.xml, artemis-users.properties en
+# artemis-roles.properties op de schijf (etc-override). Wachtwoorden komen uit Secrets die deploy.sh aanmaakt, nooit uit git:
+#   artemis-credentials          beheerder (rol amq)
+#   artemis-adapter-credentials  source-adapter (rol eam-source) en target-adapter (rol eam-target)
 apiVersion: v1
 kind: Service
 metadata:
@@ -46,6 +49,36 @@ spec:
         fsGroup: 1001          # de gebruiker "artemis" in de image mag naar de schijf schrijven
         seccompProfile:
           type: RuntimeDefault
+      initContainers:
+        - name: configuratie
+          image: alpine:3.20
+          command: ["/bin/sh", "/cfg/init-users.sh"]
+          env:
+            - { name: SRC, value: /cfg/broker.xml }
+            - name: ADMIN_USER
+              valueFrom: { secretKeyRef: { name: artemis-credentials, key: user } }
+            - name: ADMIN_PASSWORD
+              valueFrom: { secretKeyRef: { name: artemis-credentials, key: password } }
+            - name: SOURCE_USER
+              valueFrom: { secretKeyRef: { name: artemis-adapter-credentials, key: source-user } }
+            - name: SOURCE_PASSWORD
+              valueFrom: { secretKeyRef: { name: artemis-adapter-credentials, key: source-password } }
+            - name: TARGET_USER
+              valueFrom: { secretKeyRef: { name: artemis-adapter-credentials, key: target-user } }
+            - name: TARGET_PASSWORD
+              valueFrom: { secretKeyRef: { name: artemis-adapter-credentials, key: target-password } }
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN", "DAC_OVERRIDE", "FOWNER"]
+          volumeMounts:
+            - name: data
+              mountPath: /inst
+            - name: cfg
+              mountPath: /cfg
+              readOnly: true
       containers:
         - name: artemis
           image: apache/artemis:2.57.0
@@ -91,11 +124,8 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/artemis-instance
-            - name: etc-override
-              mountPath: /var/lib/artemis-instance/etc-override
-              readOnly: true
       volumes:
-        - name: etc-override
+        - name: cfg
           configMap:
             name: artemis-etc-override
   volumeClaimTemplates:
