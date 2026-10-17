@@ -99,7 +99,7 @@ afgeleverd, afgekeurd, met `correlationId`) in een tabel of logstroom. Daarnaast
    niet: stuur het met reden-headers naar `eam.workorder.v1.dlq` en bevestig het origineel (zelfde patroon als de
    huidige DLQ-headers).
 3. Transformeren naar het monteur-model (zie 4.6) en aanroepen van de werkorder-api, bijvoorbeeld
-   `PUT /intern/werkorders/{id}`. In de PoC met een gedeelde API-sleutel (`X-Api-Key`); voor productie een service-account via Keycloak.
+   `PUT /intern/werkorders/{id}`, met het token van het Keycloak-service-account `target-adapter` (client credentials, rol `werkorder-schrijver`).
 4. Het antwoord bepaalt wat er met het bericht gebeurt (zoals gebouwd; de adapter verwerkt één bericht tegelijk en meldt een tijdelijke fout als *modified* met `delivery_failed`, zodat Artemis de poging telt):
 
    | Antwoord van de API | Actie in de adapter |
@@ -249,8 +249,13 @@ Genomen (2026-10-17):
 5. **Kafka blijft voor events** (`werkorder-notificaties` dun, `werkorder-events` voor analytics en andere afnemers). De werkorder-api publiceert via een outbox, niet de adapter.
 6. **Verwerkingslog:** gestructureerde JSON-logregels per bericht (`messageId`, `correlationId`, stap, uitkomst). Een Kafka-topic `eam-integration-log` volgt als analytics erom vraagt.
 
-7. **Interne schrijf-API beveiligd met een gedeelde sleutel** (`INTERN_API_KEY`), niet met een Keycloak-service-account. Eenvoudiger
-   voor de PoC; het pad `/intern` loopt niet via de gateway. Productie: client credentials of mTLS.
+7. **Interne schrijf-API beveiligd met een Keycloak-service-account** (client `target-adapter`, client credentials, realmrol
+   `werkorder-schrijver`). De API controleert handtekening, uitgever, doelgroep, `azp` en rol; een monteurtoken komt er niet door en
+   het service-token mag de monteur-API niet lezen. Het pad `/intern` loopt bovendien niet via de gateway. De gedeelde sleutel
+   `INTERN_API_KEY` bestaat nog alleen voor lokaal testen zonder Keycloak.
+8. **Artemis met minimale rechten per partij:** beheerder (rol `amq`), source-adapter (rol `eam-source`: alleen versturen naar
+   `eam.workorder.v1`) en target-adapter (rol `eam-target`: ontvangen van de queue, versturen naar de `.dlq`). Gebruikers en rollen komen
+   uit `artemis/init-users.sh`; de rechten staan in `broker.xml`. Productie: wachtwoorden uit een kluis, TLS op de acceptor.
 
 Geverifieerd op 2026-10-17 met `scripts/smoketest.sh --volledig` (42 controles groen, Docker Compose, Artemis 2.57.0):
 

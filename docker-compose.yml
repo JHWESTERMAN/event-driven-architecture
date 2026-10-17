@@ -70,7 +70,8 @@ services:
       PORT: 8081
       DB_PATH: /data/werkorders.db          # SQLite (PoC); het volume houdt de data over herstarts heen
       KAFKA_BROKER: redpanda:9092           # de outbox-relay publiceert hiernaartoe
-      INTERN_API_KEY: ${INTERN_API_KEY:-dev-intern-sleutel}   # alleen PoC; zie .env.example
+      # Schrijven mag alleen met een token van het service-account target-adapter (rol werkorder-schrijver).
+      # Zet INTERN_API_KEY alleen als je lokaal zonder Keycloak wilt testen.
     volumes:
       - werkorder-data:/data
     depends_on:
@@ -107,6 +108,13 @@ services:
       KC_BOOTSTRAP_ADMIN_PASSWORD: admin          # alleen lokaal; het beheerscherm is niet van buiten bereikbaar
       KC_HOSTNAME: http://localhost:8180          # de URL waarmee de BROWSER bij Keycloak komt (= "iss" in de tokens)
       JAVA_OPTS_KC_HEAP: "-Xms64m -Xmx512m"       # houdt het geheugengebruik laag
+      TARGET_ADAPTER_CLIENT_SECRET: ${TARGET_ADAPTER_CLIENT_SECRET:-target-adapter-dev-secret}   # komt via ${...} in het realm-bestand terecht
+    healthcheck:                                  # poort open = realm is geïmporteerd (de import gebeurt vóór het luisteren)
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/8080' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
     volumes:
       - ./keycloak/werkorders-realm.json:/opt/keycloak/data/import/werkorders-realm.json:ro
     ports:
@@ -118,17 +126,40 @@ services:
   # Queue eam.workorder.v1 en Dead Letter Address staan in artemis/etc-override/broker.xml.
   # Console: http://localhost:8161 (alleen vanaf deze computer). Inloggegevens: zie .env.example.
   # ---------------------------------------------------------------
+  # Zet vóór de eerste start de broker-configuratie en de gebruikers/rollen in het volume (etc-override). Artemis leest die map
+  # alleen bij het AANMAKEN van de instance: na een wijziging dus `docker compose down -v` (zie artemis/README.md).
+  #   artemis      beheerder (console, rooktest)       rol amq
+  #   source-adapter                                   rol eam-source: alleen versturen naar eam.workorder.v1
+  #   target-adapter                                   rol eam-target: ontvangen van eam.workorder.v1, versturen naar de .dlq
+  artemis-init:
+    image: alpine:3.20
+    container_name: artemis-init
+    environment:
+      ADMIN_USER: ${ARTEMIS_USER:-artemis}
+      ADMIN_PASSWORD: ${ARTEMIS_PASSWORD:-artemis}
+      SOURCE_USER: ${SOURCE_ADAPTER_BROKER_USER:-source-adapter}
+      SOURCE_PASSWORD: ${SOURCE_ADAPTER_BROKER_PASSWORD:-source-adapter-dev}
+      TARGET_USER: ${TARGET_ADAPTER_BROKER_USER:-target-adapter}
+      TARGET_PASSWORD: ${TARGET_ADAPTER_BROKER_PASSWORD:-target-adapter-dev}
+    volumes:
+      - artemis-data:/inst
+      - ./artemis/etc-override/broker.xml:/src/broker.xml:ro
+      - ./artemis/init-users.sh:/init-users.sh:ro
+    entrypoint: ["/bin/sh", "/init-users.sh"]
+
   artemis:
     image: apache/artemis:2.57.0
     container_name: artemis
     restart: unless-stopped
+    depends_on:
+      artemis-init:
+        condition: service_completed_successfully
     environment:
       ARTEMIS_USER: ${ARTEMIS_USER:-artemis}
       ARTEMIS_PASSWORD: ${ARTEMIS_PASSWORD:-artemis}      # alleen lokaal; in k8s komt dit uit een Secret
       EXTRA_ARGS: "--http-host 0.0.0.0 --relax-jolokia --java-memory 512M"   # standaardwaarde plus een kleinere heap
     volumes:
       - artemis-data:/var/lib/artemis-instance
-      - ./artemis/etc-override:/var/lib/artemis-instance/etc-override:ro
     ports:
       - "127.0.0.1:61616:61616"    # CORE en AMQP 1.0
       - "127.0.0.1:8161:8161"      # webconsole
@@ -155,8 +186,8 @@ services:
       BROKER_HOST: artemis
       BROKER_PORT: 61616
       BROKER_QUEUE: eam.workorder.v1
-      BROKER_USER: ${ARTEMIS_USER:-artemis}
-      BROKER_PASSWORD: ${ARTEMIS_PASSWORD:-artemis}
+      BROKER_USER: ${SOURCE_ADAPTER_BROKER_USER:-source-adapter}
+      BROKER_PASSWORD: ${SOURCE_ADAPTER_BROKER_PASSWORD:-source-adapter-dev}
     depends_on:
       artemis:
         condition: service_healthy
@@ -185,14 +216,19 @@ services:
       BROKER_PORT: 61616
       BROKER_QUEUE: eam.workorder.v1
       BROKER_DLQ: eam.workorder.v1.dlq
-      BROKER_USER: ${ARTEMIS_USER:-artemis}
-      BROKER_PASSWORD: ${ARTEMIS_PASSWORD:-artemis}
+      BROKER_USER: ${TARGET_ADAPTER_BROKER_USER:-target-adapter}
+      BROKER_PASSWORD: ${TARGET_ADAPTER_BROKER_PASSWORD:-target-adapter-dev}
       API_URL: http://werkorder-api:8081
-      INTERN_API_KEY: ${INTERN_API_KEY:-dev-intern-sleutel}
+      # Inloggen als service-account (client credentials). Het token bevat de rol die /intern vraagt.
+      OIDC_TOKEN_URL: http://keycloak:8080/realms/werkorders/protocol/openid-connect/token
+      OIDC_CLIENT_ID: target-adapter
+      OIDC_CLIENT_SECRET: ${TARGET_ADAPTER_CLIENT_SECRET:-target-adapter-dev-secret}
     depends_on:
       artemis:
         condition: service_healthy
       werkorder-api:
+        condition: service_healthy
+      keycloak:
         condition: service_healthy
     expose:
       - "8091"

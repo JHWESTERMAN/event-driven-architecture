@@ -47,13 +47,20 @@ if ! kubectl -n werkorder get secret keycloak-admin >/dev/null 2>&1; then
 fi
 
 kubectl -n werkorder create configmap artemis-etc-override \
-  --from-file=artemis/etc-override --dry-run=client -o yaml | kubectl apply -f -
+  --from-file=broker.xml=artemis/etc-override/broker.xml --from-file=init-users.sh=artemis/init-users.sh \
+  --dry-run=client -o yaml | kubectl apply -f -
 # Artemis-inlog en de gedeelde sleutel van de interne API: eenmalig willekeurig aanmaken, nooit in git
 if ! kubectl -n werkorder get secret artemis-credentials >/dev/null 2>&1; then
   kubectl -n werkorder create secret generic artemis-credentials --from-literal=user=artemis --from-literal=password="$(openssl rand -hex 16)"
 fi
-if ! kubectl -n werkorder get secret intern-api-key >/dev/null 2>&1; then
-  kubectl -n werkorder create secret generic intern-api-key --from-literal=key="$(openssl rand -hex 24)"
+# Eigen Artemis-gebruikers per adapter (rollen eam-source en eam-target) en het geheim van het Keycloak-service-account
+if ! kubectl -n werkorder get secret artemis-adapter-credentials >/dev/null 2>&1; then
+  kubectl -n werkorder create secret generic artemis-adapter-credentials \
+    --from-literal=source-user=source-adapter --from-literal=source-password="$(openssl rand -hex 16)" \
+    --from-literal=target-user=target-adapter --from-literal=target-password="$(openssl rand -hex 16)"
+fi
+if ! kubectl -n werkorder get secret target-adapter-oidc >/dev/null 2>&1; then
+  kubectl -n werkorder create secret generic target-adapter-oidc --from-literal=secret="$(openssl rand -hex 24)"
 fi
 
 echo "==> 3/6 Redpanda en Artemis"

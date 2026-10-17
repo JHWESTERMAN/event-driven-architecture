@@ -75,6 +75,34 @@ zet_op_queue() { # zet_op_queue <messageId> ; body op stdin
     setTimeout(()=>{console.log("time-out");process.exit(1);},10000);' 2>/dev/null | grep -q '^ok$'
 }
 
+# HTTP-status van een aanroep aan de werkorder-api, vanuit de Compose-omgeving (de API staat niet op de host)
+api_status() { # api_status <METHOD> <pad> [token]
+  $DC exec -T -e TOK="${3:-}" -e METHOD="$1" -e URLPAD="$2" target-adapter node -e '
+    fetch("http://werkorder-api:8081"+process.env.URLPAD,{method:process.env.METHOD,
+      headers:{"Content-Type":"application/json",...(process.env.TOK?{Authorization:"Bearer "+process.env.TOK}:{})},
+      body:process.env.METHOD==="PUT"?"{}":undefined}).then(r=>console.log(r.status)).catch(e=>console.log("fout"))' 2>/dev/null | tr -d '\r'
+}
+service_token() { # token van het service-account, opgehaald zoals de target-adapter dat doet
+  $DC exec -T target-adapter node -e '
+    fetch(process.env.OIDC_TOKEN_URL,{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},
+      body:new URLSearchParams({grant_type:"client_credentials",client_id:process.env.OIDC_CLIENT_ID,client_secret:process.env.OIDC_CLIENT_SECRET})})
+      .then(r=>r.json()).then(j=>console.log(j.access_token||"")).catch(()=>console.log(""))' 2>/dev/null | tr -d '\r'
+}
+monteur_token() { curl -s -m 10 -d grant_type=password -d client_id=werkorders-test -d username=m-017 -d password=welkom017 \
+  http://localhost:8180/realms/werkorders/protocol/openid-connect/token | jget access_token; }
+
+# Probeert als <gebruiker> te ontvangen of te versturen op eam.workorder.v1. Antwoord: ok | geweigerd
+amqp_probe() { # amqp_probe <receive|send> <gebruiker> <wachtwoord>
+  $DC exec -T -e MODUS="$1" -e U="$2" -e W="$3" source-adapter node -e '
+    const rhea=require("rhea"); let klaar=false;
+    const uit=(x)=>{ if(!klaar){klaar=true;console.log(x);process.exit(0);} };
+    const c=rhea.connect({host:process.env.BROKER_HOST,port:Number(process.env.BROKER_PORT),username:process.env.U,password:process.env.W,reconnect:false});
+    for (const e of ["connection_error","receiver_error","sender_error","receiver_close","sender_close","disconnected","error","rejected","released","modified"]) c.on(e,()=>uit("geweigerd"));
+    if (process.env.MODUS==="receive") { c.open_receiver({source:{address:"eam.workorder.v1"},credit_window:0}); setTimeout(()=>uit("ok"),2500); }
+    else { const s=c.open_sender("eam.workorder.v1"); s.on("sendable",x=>x.sender.send({durable:true,body:"{}"})); c.on("accepted",()=>uit("ok")); setTimeout(()=>uit("ok?"),4000); }
+    setTimeout(()=>uit("geweigerd"),8000);' 2>/dev/null | tr -d '\r'
+}
+
 kafka_lees() { # kafka_lees <topic> -> schrijft naar $TMP/<topic>.txt (leest ongeveer 6 seconden)
   local f="$TMP/$1.txt"; : > "$f"
   $DC exec -T redpanda rpk topic consume "$1" -o start --format '%k|%v\n' > "$f" 2>/dev/null &
@@ -153,6 +181,24 @@ else
   controle "target-adapter logde reden CANONIEK_ONGELDIG" log_heeft "dlq-test-schema-$T.*CANONIEK_ONGELDIG"
   controle "werkorder-api kreeg niets te zien van deze berichten" bash -c "! $DC logs werkorder-api 2>/dev/null | grep -q WO-9999"
   dlq_leegmaken; wacht_tot 10 dlq_is "$DLQ0" && info "testberichten uit de DLQ verwijderd" || info "DLQ niet opgeschoond; verwijder de testberichten zelf in de console (http://localhost:8161)"
+fi
+
+# ----------------------------------------------------------------------------------------------
+kop "4c. Rechten: iedere partij kan alleen wat hij moet kunnen"
+SRC_U="${SOURCE_ADAPTER_BROKER_USER:-source-adapter}"; SRC_W="${SOURCE_ADAPTER_BROKER_PASSWORD:-source-adapter-dev}"
+TGT_U="${TARGET_ADAPTER_BROKER_USER:-target-adapter}"; TGT_W="${TARGET_ADAPTER_BROKER_PASSWORD:-target-adapter-dev}"
+controle "Artemis: verkeerd wachtwoord wordt geweigerd" test "$(amqp_probe receive "$SRC_U" verkeerd)" = "geweigerd"
+controle "Artemis: source-adapter mag NIET ontvangen van de queue" test "$(amqp_probe receive "$SRC_U" "$SRC_W")" = "geweigerd"
+controle "Artemis: target-adapter mag NIET versturen naar de queue" test "$(amqp_probe send "$TGT_U" "$TGT_W")" = "geweigerd"
+controle "Artemis: queue is na deze pogingen nog leeg" wacht_tot 5 queue_is eam.workorder.v1 0
+SVC="$(service_token)"; MON="$(monteur_token)"
+if [ -z "$SVC" ]; then rood "geen service-token van Keycloak gekregen (staat target-adapter in het realm? Keycloak opnieuw aanmaken: docker compose up -d --force-recreate keycloak)"; fi
+[ -n "$SVC" ] && [ -n "$MON" ] || info "geen tokens: API-rechtencontroles worden overgeslagen"
+if [ -n "$SVC" ] && [ -n "$MON" ]; then
+  controle "werkorder-api: PUT /intern zonder token geeft 401" test "$(api_status PUT /intern/werkorders/WO-9998)" = "401"
+  controle "werkorder-api: PUT /intern met monteurtoken geeft 401" test "$(api_status PUT /intern/werkorders/WO-9998 "$MON")" = "401"
+  controle "werkorder-api: PUT /intern met service-token komt langs de autorisatie (422 op de lege body)" test "$(api_status PUT /intern/werkorders/WO-9998 "$SVC")" = "422"
+  controle "werkorder-api: service-token mag de monteur-API niet lezen (401)" test "$(api_status GET /api/werkorders "$SVC")" = "401"
 fi
 
 # ----------------------------------------------------------------------------------------------
