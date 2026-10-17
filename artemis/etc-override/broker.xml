@@ -1,0 +1,165 @@
+<?xml version='1.0'?>
+<!--
+  Broker-configuratie voor de EAM-integratie (Apache ActiveMQ Artemis).
+  Basis: het standaard broker.xml dat `artemis create` genereert, ingevuld voor deze opzet.
+  De docker-image kopieert dit bestand na het aanmaken van de broker-instantie over de standaardconfiguratie
+  (/var/lib/artemis-instance/etc-override, zie artemis/README.md).
+
+  Wat hier specifiek is:
+    - twee acceptors-protocollen: CORE (Java/JMS-clients) en AMQP 1.0 (de Node-adapters via rhea)
+    - queue eam.workorder.v1 met Dead Letter Address eam.workorder.v1.dlq
+    - herlevering met oplopende vertraging, na 5 pogingen naar de Dead Letter Address
+    - geen automatisch aanmaken van queues en adressen onder eam.#
+-->
+<configuration xmlns="urn:activemq"
+               xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+               xmlns:xi="http://www.w3.org/2001/XInclude"
+               xsi:schemaLocation="urn:activemq /schema/artemis-configuration.xsd">
+
+   <core xmlns="urn:activemq:core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="urn:activemq:core ">
+
+      <name>eam-broker</name>
+
+      <persistence-enabled>true</persistence-enabled>
+
+      <max-redelivery-records>1</max-redelivery-records>
+
+      <!-- NIO werkt overal (ook op Docker Desktop); ASYNCIO vraagt libaio en een geschikt bestandssysteem -->
+      <journal-type>NIO</journal-type>
+
+      <paging-directory>data/paging</paging-directory>
+      <bindings-directory>data/bindings</bindings-directory>
+      <journal-directory>data/journal</journal-directory>
+      <large-messages-directory>data/large-messages</large-messages-directory>
+
+      <journal-datasync>true</journal-datasync>
+      <journal-min-files>2</journal-min-files>
+      <journal-pool-files>10</journal-pool-files>
+      <journal-device-block-size>4096</journal-device-block-size>
+      <journal-file-size>10M</journal-file-size>
+
+      <disk-scan-period>5000</disk-scan-period>
+      <max-disk-usage>90</max-disk-usage>
+
+      <critical-analyzer>true</critical-analyzer>
+      <critical-analyzer-timeout>120000</critical-analyzer-timeout>
+      <critical-analyzer-check-period>60000</critical-analyzer-check-period>
+      <critical-analyzer-policy>HALT</critical-analyzer-policy>
+
+      <acceptors>
+         <!-- AMQP 1.0 en CORE op een poort. amqpDuplicateDetection=true laat de broker ontdubbelen op de
+              application property _AMQ_DUPL_ID, als de source-adapter die meestuurt (waarde: messageId).
+              Getest met scripts/smoketest.sh (stap 7): de broker laat een herhaald bericht maar een keer door. -->
+         <acceptor name="artemis">tcp://0.0.0.0:61616?tcpSendBufferSize=1048576;tcpReceiveBufferSize=1048576;amqpMinLargeMessageSize=102400;protocols=CORE,AMQP;useEpoll=true;amqpCredits=1000;amqpLowCredits=300;amqpDuplicateDetection=true;supportAdvisory=false;suppressInternalManagementObjects=true</acceptor>
+      </acceptors>
+
+      <!-- Eerste versie: een rol (amq) mag alles, zoals in het standaard-broker.xml. Volgende stap: aparte
+           gebruikers en rollen (source-adapter alleen send, target-adapter alleen consume) per queue. -->
+      <security-settings>
+         <security-setting match="#">
+            <permission type="createNonDurableQueue" roles="amq"/>
+            <permission type="deleteNonDurableQueue" roles="amq"/>
+            <permission type="createDurableQueue" roles="amq"/>
+            <permission type="deleteDurableQueue" roles="amq"/>
+            <permission type="createAddress" roles="amq"/>
+            <permission type="deleteAddress" roles="amq"/>
+            <permission type="consume" roles="amq"/>
+            <permission type="browse" roles="amq"/>
+            <permission type="send" roles="amq"/>
+         </security-setting>
+         <security-setting match="activemq.management.#">
+            <permission type="manage" roles="amq"/>
+            <permission type="createNonDurableQueue" roles="amq"/>
+            <permission type="deleteNonDurableQueue" roles="amq"/>
+            <permission type="createAddress" roles="amq"/>
+            <permission type="deleteAddress" roles="amq"/>
+            <permission type="consume" roles="amq"/>
+            <permission type="send" roles="amq"/>
+         </security-setting>
+      </security-settings>
+
+      <address-settings>
+         <address-setting match="activemq.management.#">
+            <dead-letter-address>DLQ</dead-letter-address>
+            <expiry-address>ExpiryQueue</expiry-address>
+            <redelivery-delay>0</redelivery-delay>
+            <max-size-bytes>-1</max-size-bytes>
+            <message-counter-history-day-limit>10</message-counter-history-day-limit>
+            <address-full-policy>PAGE</address-full-policy>
+            <auto-create-queues>true</auto-create-queues>
+            <auto-create-addresses>true</auto-create-addresses>
+         </address-setting>
+
+         <!-- De werkorder-queue: expliciet beheerd, herlevering met oplopende vertraging, daarna naar de DLA.
+              Vertragingen: 2 s, 4 s, 8 s, 16 s (maximaal 60 s); poging 5 mislukt = naar eam.workorder.v1.dlq -->
+         <address-setting match="eam.workorder.v1">
+            <dead-letter-address>eam.workorder.v1.dlq</dead-letter-address>
+            <expiry-address>ExpiryQueue</expiry-address>
+            <max-delivery-attempts>5</max-delivery-attempts>
+            <redelivery-delay>2000</redelivery-delay>
+            <redelivery-delay-multiplier>2.0</redelivery-delay-multiplier>
+            <max-redelivery-delay>60000</max-redelivery-delay>
+            <address-full-policy>PAGE</address-full-policy>
+            <auto-create-queues>false</auto-create-queues>
+            <auto-create-addresses>false</auto-create-addresses>
+            <auto-delete-queues>false</auto-delete-queues>
+            <auto-delete-addresses>false</auto-delete-addresses>
+         </address-setting>
+
+         <!-- De DLA zelf: berichten blijven staan tot iemand ze afhandelt (herplaatsen of verwijderen) -->
+         <address-setting match="eam.workorder.v1.dlq">
+            <max-delivery-attempts>-1</max-delivery-attempts>
+            <address-full-policy>PAGE</address-full-policy>
+            <auto-create-queues>false</auto-create-queues>
+            <auto-create-addresses>false</auto-create-addresses>
+            <auto-delete-queues>false</auto-delete-queues>
+            <auto-delete-addresses>false</auto-delete-addresses>
+         </address-setting>
+
+         <address-setting match="#">
+            <dead-letter-address>DLQ</dead-letter-address>
+            <expiry-address>ExpiryQueue</expiry-address>
+            <redelivery-delay>0</redelivery-delay>
+            <message-counter-history-day-limit>10</message-counter-history-day-limit>
+            <address-full-policy>PAGE</address-full-policy>
+            <auto-create-queues>true</auto-create-queues>
+            <auto-create-addresses>true</auto-create-addresses>
+            <auto-delete-queues>false</auto-delete-queues>
+            <auto-delete-addresses>false</auto-delete-addresses>
+            <page-size-bytes>10M</page-size-bytes>
+            <max-size-bytes>-1</max-size-bytes>
+            <max-size-messages>-1</max-size-messages>
+            <max-read-page-messages>-1</max-read-page-messages>
+            <max-read-page-bytes>20M</max-read-page-bytes>
+            <page-limit-bytes>-1</page-limit-bytes>
+            <page-limit-messages>-1</page-limit-messages>
+         </address-setting>
+      </address-settings>
+
+      <addresses>
+         <address name="DLQ">
+            <anycast>
+               <queue name="DLQ" />
+            </anycast>
+         </address>
+         <address name="ExpiryQueue">
+            <anycast>
+               <queue name="ExpiryQueue" />
+            </anycast>
+         </address>
+         <!-- Taakgerichte queue: een bericht gaat naar precies een consument (anycast) -->
+         <address name="eam.workorder.v1">
+            <anycast>
+               <queue name="eam.workorder.v1" />
+            </anycast>
+         </address>
+         <address name="eam.workorder.v1.dlq">
+            <anycast>
+               <queue name="eam.workorder.v1.dlq" />
+            </anycast>
+         </address>
+      </addresses>
+
+   </core>
+</configuration>
