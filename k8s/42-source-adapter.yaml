@@ -22,6 +22,16 @@ spec:
         runAsUser: 1000
         seccompProfile:
           type: RuntimeDefault
+      volumes:
+        - name: geheimen
+          projected:
+            sources:
+              - secret:
+                  name: artemis-adapter-credentials
+                  items: [{ key: source-password, path: artemis_source_password }]
+              - secret:
+                  name: artemis-tls
+                  items: [{ key: ca.pem, path: broker_ca }]
       containers:
         - name: source-adapter
           image: REGISTRY/source-adapter:IMAGE_TAG
@@ -40,9 +50,10 @@ spec:
             - name: BROKER_USER
               valueFrom:
                 secretKeyRef: { name: artemis-adapter-credentials, key: source-user }
-            - name: BROKER_PASSWORD
-              valueFrom:
-                secretKeyRef: { name: artemis-adapter-credentials, key: source-password }
+            - { name: BROKER_PASSWORD_FILE, value: /run/secrets/artemis_source_password }   # geheim als bestand, niet als omgevingsvariabele
+            - { name: BROKER_TLS_CA, value: /run/secrets/broker_ca }       # alleen deze CA wordt vertrouwd; keten en hostnaam worden gecontroleerd
+          volumeMounts:
+            - { name: geheimen, mountPath: /run/secrets, readOnly: true }
           resources:
             requests:
               cpu: 25m

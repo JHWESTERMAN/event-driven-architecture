@@ -6,6 +6,8 @@
 # artemis-roles.properties op de schijf (etc-override). Wachtwoorden komen uit Secrets die deploy.sh aanmaakt, nooit uit git:
 #   artemis-credentials          beheerder (rol amq)
 #   artemis-adapter-credentials  source-adapter (rol eam-source) en target-adapter (rol eam-target)
+#   artemis-tls                  servercertificaat (broker.p12), keystore-wachtwoord en CA (ca.pem); de acceptor is alleen TLS
+# Met Azure Key Vault (KEYVAULT_NAME bij deploy.sh) vult de Secrets Store CSI-driver de eerste twee, zie 70-secrets-keyvault.yaml.
 apiVersion: v1
 kind: Service
 metadata:
@@ -53,20 +55,20 @@ spec:
         - name: configuratie
           image: alpine:3.20
           command: ["/bin/sh", "/cfg/init-users.sh"]
+          # Geheimen komen als bestand (projected volume "geheimen", alleen-lezen) en niet als omgevingsvariabele; zie init-users.sh
           env:
             - { name: SRC, value: /cfg/broker.xml }
             - name: ADMIN_USER
               valueFrom: { secretKeyRef: { name: artemis-credentials, key: user } }
-            - name: ADMIN_PASSWORD
-              valueFrom: { secretKeyRef: { name: artemis-credentials, key: password } }
+            - { name: ADMIN_PASSWORD_FILE, value: /geheimen/admin-password }
             - name: SOURCE_USER
               valueFrom: { secretKeyRef: { name: artemis-adapter-credentials, key: source-user } }
-            - name: SOURCE_PASSWORD
-              valueFrom: { secretKeyRef: { name: artemis-adapter-credentials, key: source-password } }
+            - { name: SOURCE_PASSWORD_FILE, value: /geheimen/source-password }
             - name: TARGET_USER
               valueFrom: { secretKeyRef: { name: artemis-adapter-credentials, key: target-user } }
-            - name: TARGET_PASSWORD
-              valueFrom: { secretKeyRef: { name: artemis-adapter-credentials, key: target-password } }
+            - { name: TARGET_PASSWORD_FILE, value: /geheimen/target-password }
+            - { name: KEYSTORE_PASSWORD_FILE, value: /geheimen/keystore-password }
+            - { name: TLS_KEYSTORE, value: /geheimen/broker.p12 }
           securityContext:
             runAsUser: 0
             allowPrivilegeEscalation: false
@@ -79,16 +81,17 @@ spec:
             - name: cfg
               mountPath: /cfg
               readOnly: true
+            - name: geheimen
+              mountPath: /geheimen
+              readOnly: true
       containers:
         - name: artemis
           image: apache/artemis:2.57.0
           env:
-            - name: ARTEMIS_USER
-              valueFrom:
-                secretKeyRef: { name: artemis-credentials, key: user }
-            - name: ARTEMIS_PASSWORD
-              valueFrom:
-                secretKeyRef: { name: artemis-credentials, key: password }
+            # Waardeloze opstartgebruiker van de image; het gebruikersbestand uit etc-override (de initContainer) vervangt hem.
+            # De echte wachtwoorden staan niet in de omgeving van de broker. Zie ook docker-compose.yml.
+            - { name: ARTEMIS_USER, value: bootstrap }
+            - { name: ARTEMIS_PASSWORD, value: bootstrap }
             - name: EXTRA_ARGS
               value: "--http-host 0.0.0.0 --relax-jolokia --java-memory 512M"
           ports:
@@ -128,6 +131,18 @@ spec:
         - name: cfg
           configMap:
             name: artemis-etc-override
+        - name: geheimen
+          projected:
+            sources:
+              - secret:
+                  name: artemis-credentials
+                  items: [{ key: password, path: admin-password }]
+              - secret:
+                  name: artemis-adapter-credentials
+                  items: [{ key: source-password, path: source-password }, { key: target-password, path: target-password }]
+              - secret:
+                  name: artemis-tls
+                  items: [{ key: broker.p12, path: broker.p12 }, { key: keystore-password, path: keystore-password }]
   volumeClaimTemplates:
     - metadata:
         name: data
