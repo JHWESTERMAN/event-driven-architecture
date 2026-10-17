@@ -1,0 +1,20 @@
+{
+  "kop": {
+    "berichtId": "a4c2e8f6-1b35-47d9-a0e2-6c8f1d3b5a77",
+    "verzondenOp": "02-11-2026 09:00:00",
+    "bronSysteem": "OMS",
+    "berichtSoort": "NIEUW",
+    "volgnummer": 1
+  },
+  "opdracht": {
+    "opdrachtNr": "WOP-001003",
+    "soortCode": "PRV",
+    "prioriteitCode": 3,
+    "statusCode": "01",
+    "omschrijving": { "kort": "Jaarlijkse inspectie overweg" },
+    "object": { "objectNr": "OBJ-00877", "functioneleLocatie": "EHV-Z-OVW-0877", "objectType": "OVW" },
+    "locatie": { "plaats": "Eindhoven" },
+    "werkpakket": [],
+    "materialen": []
+  }
+}

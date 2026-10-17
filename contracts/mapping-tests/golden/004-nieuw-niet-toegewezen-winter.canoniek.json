@@ -1,0 +1,23 @@
+{
+  "envelope": {
+    "messageId": "a4c2e8f6-1b35-47d9-a0e2-6c8f1d3b5a77",
+    "correlationId": "a4c2e8f6-1b35-47d9-a0e2-6c8f1d3b5a77",
+    "type": "eam.workorder.created",
+    "schemaVersion": "1.0",
+    "sourceSystem": "OMS",
+    "occurredAt": "2026-11-02T08:00:00Z",
+    "version": 1
+  },
+  "workOrder": {
+    "id": "WO-1003",
+    "sourceReference": "WOP-001003",
+    "type": "PREVENTIVE",
+    "priority": "NORMAL",
+    "status": "REQUESTED",
+    "description": "Jaarlijkse inspectie overweg",
+    "asset": { "id": "A-877", "functionalLocation": "EHV-Z-OVW-0877", "kind": "LEVEL_CROSSING" },
+    "location": { "place": "Eindhoven" },
+    "tasks": [],
+    "materials": []
+  }
+}

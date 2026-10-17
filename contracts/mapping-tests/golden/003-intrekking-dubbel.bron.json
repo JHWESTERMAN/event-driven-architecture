@@ -1,0 +1,10 @@
+{
+  "kop": {
+    "berichtId": "5b8e1d90-2f47-4a6c-8c13-9d0e7a4b6f22",
+    "verzondenOp": "17-10-2026 12:05:00",
+    "bronSysteem": "OMS",
+    "berichtSoort": "INTREKKING",
+    "volgnummer": 3
+  },
+  "opdracht": { "opdrachtNr": "WOP-001002", "redenCode": "DUBBEL" }
+}
