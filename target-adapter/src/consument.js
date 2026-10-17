@@ -12,8 +12,8 @@
 const rhea = require('rhea');
 
 class Consument {
-  constructor({ host, port, user, password, queue, dlq, beslis, log = () => {}, dlqTimeoutMs = 5000 }) {
-    Object.assign(this, { opties: { host, port, user, password }, queue, dlq, beslis, log, dlqTimeoutMs });
+  constructor({ host, port, user, password, tls = {}, queue, dlq, beslis, log = () => {}, dlqTimeoutMs = 5000 }) {
+    Object.assign(this, { opties: { host, port, user, password, tls }, queue, dlq, beslis, log, dlqTimeoutMs });
     this.lopendDlq = new Map();
     this.generatie = 0;
     this.stats = { ontvangen: 0, bevestigd: 0, opnieuw: 0, naarDlq: 0 };
@@ -44,6 +44,7 @@ class Consument {
 
     this.connection = c.connect({
       host: this.opties.host, port: this.opties.port, username: this.opties.user, password: this.opties.password,
+      ...this.opties.tls,                       // transport: 'tls', ca, servername (zie omgeving.js)
       container_id: 'target-adapter', reconnect: true, initial_reconnect_delay: 200, max_reconnect_delay: 5000
     });
     this.receiver = this.connection.open_receiver({ name: 'target-adapter-receiver', source: { address: this.queue }, credit_window: 0, autoaccept: false });
@@ -117,7 +118,14 @@ class Consument {
     if (fout) l.reject(fout); else l.resolve();
   }
 
-  close() { try { if (this.connection) this.connection.close(); } catch (e) { /* al dicht */ } }
+  close() {
+    try {
+      if (this.connection) {
+        this.connection.options.reconnect = false;   // anders blijft een nooit-geopende verbinding opnieuw proberen
+        this.connection.close();
+      }
+    } catch (e) { /* al dicht */ }
+  }
 }
 
 module.exports = { Consument };

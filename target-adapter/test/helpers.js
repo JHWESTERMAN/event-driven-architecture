@@ -21,7 +21,7 @@ function maakFakeApi() {
 
 // Nagebootste broker: levert berichten aan de receiver zodra die krediet geeft en noteert hoe de adapter ze afhandelt.
 // Ontvangt ook de berichten die de adapter naar de DLQ stuurt.
-function maakFakeBroker() {
+function maakFakeBroker({ tls } = {}) {
   const container = rhea.create_container({ autoaccept: false });
   container.sasl_server_mechanisms.enable_plain((g, w) => g === 'x' && w === 'y');
   const fake = { rij: [], zender: null, uitkomsten: [], dlq: [], sockets: new Set(), dlqGedrag: 'accepteer' };
@@ -49,7 +49,7 @@ function maakFakeBroker() {
   });
   fake.zet = (bericht) => { fake.rij.push(bericht); lever(); };
   fake.start = () => new Promise((resolve, reject) => {
-    fake.server = container.listen({ port: 0, host: '127.0.0.1', autoaccept: false });
+    fake.server = container.listen({ port: 0, host: '127.0.0.1', autoaccept: false, ...(tls ? { transport: 'tls', key: tls.key, cert: tls.cert } : {}) });
     fake.server.on('connection', (s) => { fake.sockets.add(s); s.on('close', () => fake.sockets.delete(s)); });
     fake.server.once('error', reject);
     fake.server.once('listening', () => resolve(fake.server.address().port));

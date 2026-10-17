@@ -12,7 +12,10 @@ const crypto = require('crypto');
 const DB_PATH = process.env.DB_PATH || './data/werkorders.db';
 if (DB_PATH !== ':memory:') require('fs').mkdirSync(require('path').dirname(DB_PATH), { recursive: true });
 const store = maakStore({ pad: DB_PATH, seed: SEED });
-const INTERN_API_KEY = process.env.INTERN_API_KEY || '';
+// Geheim uit een bestand (INTERN_API_KEY_FILE, bv. /run/secrets/...) gaat voor de omgevingsvariabele; zie source-adapter/src/omgeving.js
+const INTERN_API_KEY = process.env.INTERN_API_KEY_FILE
+  ? require('fs').readFileSync(process.env.INTERN_API_KEY_FILE, 'utf8').replace(/\r?\n$/, '')
+  : (process.env.INTERN_API_KEY || '');
 const MAX_BODY = 256 * 1024;
 
 const TOEGESTANE_STATUSSEN = ['OPEN', 'IN_BEHANDELING', 'AFGEROND'];

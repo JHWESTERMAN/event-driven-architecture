@@ -14,8 +14,8 @@ class BrokerFout extends Error {
 }
 
 class BrokerVerbinding {
-  constructor({ host, port, user, password, adres, log = () => {} }) {
-    this.opties = { host, port, user, password };
+  constructor({ host, port, user, password, adres, tls = {}, log = () => {} }) {
+    this.opties = { host, port, user, password, tls };
     this.adres = adres;
     this.log = log;
     this.verbonden = false;
@@ -45,6 +45,7 @@ class BrokerVerbinding {
     this.connection = this.container.connect({
       host: this.opties.host, port: this.opties.port,
       username: this.opties.user, password: this.opties.password,
+      ...this.opties.tls,                       // transport: 'tls', ca, servername (zie omgeving.js)
       container_id: 'source-adapter',
       reconnect: true, initial_reconnect_delay: 200, max_reconnect_delay: 5000
     });
@@ -91,7 +92,12 @@ class BrokerVerbinding {
 
   close() {
     this.#faalAlles(new BrokerFout('adapter wordt afgesloten', 'VERBROKEN'));
-    try { if (this.connection) this.connection.close(); } catch (e) { /* al dicht */ }
+    try {
+      if (this.connection) {
+        this.connection.options.reconnect = false;   // anders blijft een nooit-geopende verbinding opnieuw proberen
+        this.connection.close();
+      }
+    } catch (e) { /* al dicht */ }
   }
 }
 

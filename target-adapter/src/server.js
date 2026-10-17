@@ -11,6 +11,7 @@ const { laadValidator } = require('./validate');
 const { beslis } = require('./verwerk');
 const { Consument } = require('./consument');
 const { maakTokenBron } = require('./token');
+const { leesGeheim, brokerTlsOpties } = require('./omgeving');
 
 function maakLogger(uit = console.log) {
   return (regel) => uit(JSON.stringify({ tijd: new Date().toISOString(), niveau: 'info', ...regel }));
@@ -22,13 +23,14 @@ function configUitOmgeving(env = process.env) {
     contractsDir: env.CONTRACTS_DIR || path.join(__dirname, '..', '..', 'contracts'),
     broker: {
       host: env.BROKER_HOST || 'localhost', port: Number(env.BROKER_PORT || 5672),
-      user: env.BROKER_USER || 'artemis', password: env.BROKER_PASSWORD || 'artemis',
+      user: env.BROKER_USER || 'artemis', password: leesGeheim(env, 'BROKER_PASSWORD', 'artemis'),
+      tls: brokerTlsOpties(env),
       queue: env.BROKER_QUEUE || 'eam.workorder.v1', dlq: env.BROKER_DLQ || 'eam.workorder.v1.dlq'
     },
     api: {
-      baseUrl: env.API_URL || 'http://werkorder-api:8081', apiKey: env.INTERN_API_KEY || '', timeoutMs: Number(env.API_TIMEOUT_MS || 5000),
+      baseUrl: env.API_URL || 'http://werkorder-api:8081', apiKey: leesGeheim(env, 'INTERN_API_KEY'), timeoutMs: Number(env.API_TIMEOUT_MS || 5000),
       // Keycloak (aanbevolen): client credentials. Zonder OIDC_TOKEN_URL valt de adapter terug op INTERN_API_KEY (alleen lokaal).
-      tokenBron: env.OIDC_TOKEN_URL ? maakTokenBron({ tokenUrl: env.OIDC_TOKEN_URL, clientId: env.OIDC_CLIENT_ID || 'target-adapter', clientSecret: env.OIDC_CLIENT_SECRET || '' }) : null
+      tokenBron: env.OIDC_TOKEN_URL ? maakTokenBron({ tokenUrl: env.OIDC_TOKEN_URL, clientId: env.OIDC_CLIENT_ID || 'target-adapter', clientSecret: leesGeheim(env, 'OIDC_CLIENT_SECRET') }) : null
     }
   };
 }
