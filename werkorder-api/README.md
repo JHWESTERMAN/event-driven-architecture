@@ -1,6 +1,6 @@
 # werkorder-api
 
-Leest (GET `/api/...`, met Keycloak-token), schrijft (PUT `/intern/werkorders/{id}`, met `X-Api-Key`) en publiceert events via een outbox.
+Leest (GET `/api/...`, met Keycloak-token), schrijft (PUT `/intern/werkorders/{id}`, met het token van het service-account `target-adapter`) en publiceert events via een outbox.
 
 | Bestand | Rol |
 |---|---|
@@ -10,7 +10,7 @@ Leest (GET `/api/...`, met Keycloak-token), schrijft (PUT `/intern/werkorders/{i
 | `outbox.js` / `publisher.js` | relay naar Kafka (at-least-once) / kafkajs-adapter |
 | `seed.js` | startdata (WO-1001..1003) voor een lege database |
 
-Omgeving: `PORT`, `DB_PATH` (default `./data/werkorders.db`, `:memory:` in tests), `INTERN_API_KEY` (leeg = interne API uit),
+Omgeving: `PORT`, `DB_PATH` (default `./data/werkorders.db`, `:memory:` in tests), `OIDC_SERVICE_CLIENT` (target-adapter) en `OIDC_SERVICE_ROLE` (werkorder-schrijver) voor de interne API, `INTERN_API_KEY` (optioneel, alleen lokaal zonder Keycloak),
 `KAFKA_BROKER` (leeg = relay uit, events blijven in de outbox), `TOPIC_EVENTS`, `TOPIC_NOTIFICATIES`, `OUTBOX_INTERVAL_MS`, `OIDC_*`.
 
 Tests: `npm test` (Node 22.13 of hoger; gebruikt `node:sqlite`).

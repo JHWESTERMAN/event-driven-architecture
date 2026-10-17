@@ -10,6 +10,7 @@ const path = require('path');
 const { laadValidator } = require('./validate');
 const { beslis } = require('./verwerk');
 const { Consument } = require('./consument');
+const { maakTokenBron } = require('./token');
 
 function maakLogger(uit = console.log) {
   return (regel) => uit(JSON.stringify({ tijd: new Date().toISOString(), niveau: 'info', ...regel }));
@@ -24,12 +25,16 @@ function configUitOmgeving(env = process.env) {
       user: env.BROKER_USER || 'artemis', password: env.BROKER_PASSWORD || 'artemis',
       queue: env.BROKER_QUEUE || 'eam.workorder.v1', dlq: env.BROKER_DLQ || 'eam.workorder.v1.dlq'
     },
-    api: { baseUrl: env.API_URL || 'http://werkorder-api:8081', apiKey: env.INTERN_API_KEY || '', timeoutMs: Number(env.API_TIMEOUT_MS || 5000) }
+    api: {
+      baseUrl: env.API_URL || 'http://werkorder-api:8081', apiKey: env.INTERN_API_KEY || '', timeoutMs: Number(env.API_TIMEOUT_MS || 5000),
+      // Keycloak (aanbevolen): client credentials. Zonder OIDC_TOKEN_URL valt de adapter terug op INTERN_API_KEY (alleen lokaal).
+      tokenBron: env.OIDC_TOKEN_URL ? maakTokenBron({ tokenUrl: env.OIDC_TOKEN_URL, clientId: env.OIDC_CLIENT_ID || 'target-adapter', clientSecret: env.OIDC_CLIENT_SECRET || '' }) : null
+    }
   };
 }
 
 function start(config = configUitOmgeving(), log = maakLogger()) {
-  if (!config.api.apiKey) throw new Error('INTERN_API_KEY ontbreekt');
+  if (!config.api.tokenBron && !config.api.apiKey) throw new Error('Stel OIDC_TOKEN_URL (met OIDC_CLIENT_SECRET) in, of voor lokaal gebruik INTERN_API_KEY');
   const valideer = laadValidator(config.contractsDir);
   const consument = new Consument({
     ...config.broker, log,

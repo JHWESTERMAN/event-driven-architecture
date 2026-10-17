@@ -135,9 +135,12 @@ paths:
         outbox (topics `werkorder-events` en `werkorder-notificaties`). Een versie-ophoging zonder
         inhoudelijke wijziging maakt geen events.
 
-        Beveiliging in de PoC: gedeelde sleutel in `X-Api-Key`. Voor productie: service-account
-        (client credentials) via Keycloak of mTLS.
+        Beveiliging: Bearer-token van het Keycloak-service-account `target-adapter` (client credentials). Het token moet
+        voor `werkorders-api` bedoeld zijn, uitgegeven zijn aan die client (`azp`) en de realmrol `werkorder-schrijver`
+        hebben. Een monteurtoken geeft dus `401`, en een service-token mag de monteur-API niet lezen.
+        Alleen voor lokaal testen zonder Keycloak bestaat nog de gedeelde sleutel in `X-Api-Key`, als `INTERN_API_KEY` is gezet.
       security:
+        - serviceAccount: []
         - internApiKey: []
       parameters:
         - name: werkorderId
@@ -162,7 +165,13 @@ paths:
         '400':
           $ref: '#/components/responses/OngeldigVerzoek'
         '401':
-          description: Ontbrekende of ongeldige API-sleutel.
+          description: Ontbrekend, ongeldig of verlopen token (of een token van een andere client).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Probleem'
+        '403':
+          description: Het token is geldig en van de juiste client, maar de rol `werkorder-schrijver` ontbreekt.
           content:
             application/json:
               schema:
@@ -185,7 +194,7 @@ paths:
                     type: array
                     items: { type: string }
         '503':
-          description: INTERN_API_KEY is niet ingesteld op de server.
+          description: De sleutels van de identity provider zijn tijdelijk niet op te halen; opnieuw proberen.
 
   /health:
     get:
@@ -209,11 +218,18 @@ paths:
 
 components:
   securitySchemes:
+    serviceAccount:
+      type: oauth2
+      description: Service-account van de target-adapter (Keycloak, realm werkorders, client `target-adapter`).
+      flows:
+        clientCredentials:
+          tokenUrl: http://localhost:8180/realms/werkorders/protocol/openid-connect/token
+          scopes: {}
     internApiKey:
       type: apiKey
       in: header
       name: X-Api-Key
-      description: Gedeelde sleutel tussen target-adapter en werkorder-api (alleen PoC).
+      description: Alleen voor lokaal testen zonder Keycloak, en alleen als INTERN_API_KEY is gezet.
     bearerAuth:
       type: http
       scheme: bearer

@@ -39,17 +39,21 @@ spec:
               value: eam.workorder.v1
             - name: BROKER_USER
               valueFrom:
-                secretKeyRef: { name: artemis-credentials, key: user }
+                secretKeyRef: { name: artemis-adapter-credentials, key: target-user }
             - name: BROKER_PASSWORD
               valueFrom:
-                secretKeyRef: { name: artemis-credentials, key: password }
+                secretKeyRef: { name: artemis-adapter-credentials, key: target-password }
             - name: BROKER_DLQ
               value: eam.workorder.v1.dlq
             - name: API_URL
               value: http://werkorder-api:8081
-            - name: INTERN_API_KEY
+            - name: OIDC_TOKEN_URL           # inloggen als service-account (client credentials)
+              value: http://keycloak:8080/realms/werkorders/protocol/openid-connect/token
+            - name: OIDC_CLIENT_ID
+              value: target-adapter
+            - name: OIDC_CLIENT_SECRET
               valueFrom:
-                secretKeyRef: { name: intern-api-key, key: key }
+                secretKeyRef: { name: target-adapter-oidc, key: secret }
           resources:
             requests:
               cpu: 25m

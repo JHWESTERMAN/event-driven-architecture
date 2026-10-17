@@ -7,12 +7,20 @@
 //   { soort: 'TIJDELIJK', reden }        netwerk, time-out, 5xx, 401/403 (misconfiguratie: herstelbaar door een operator), 429
 const PERMANENT = new Set([400, 404, 405, 409, 413, 415, 422]);
 
-async function schrijfWerkorder({ baseUrl, apiKey, werkorderId, body, timeoutMs = 5000, fetchFn = fetch }) {
+// Authenticatie: tokenBron (Keycloak, service-account) heeft voorrang; zonder tokenBron valt hij terug op apiKey (alleen lokaal).
+async function schrijfWerkorder({ baseUrl, apiKey, tokenBron, werkorderId, body, timeoutMs = 5000, fetchFn = fetch }) {
+  const auth = {};
+  if (tokenBron) {
+    try { auth.Authorization = `Bearer ${await tokenBron.haal()}`; }
+    catch (fout) { return { soort: 'TIJDELIJK', reden: `geen token: ${fout.message}` }; }
+  } else {
+    auth['X-Api-Key'] = apiKey;
+  }
   let antwoord;
   try {
     antwoord = await fetchFn(`${baseUrl}/intern/werkorders/${encodeURIComponent(werkorderId)}`, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json', 'X-Api-Key': apiKey },
+      headers: { 'Content-Type': 'application/json', ...auth },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(timeoutMs)
     });
@@ -28,6 +36,8 @@ async function schrijfWerkorder({ baseUrl, apiKey, werkorderId, body, timeoutMs 
     return { soort: 'OK', resultaat };
   }
   if (PERMANENT.has(antwoord.status)) return { soort: 'PERMANENT', status: antwoord.status, detail: tekst.slice(0, 1000) };
+  // 401/403: het token is niet (meer) geldig of de rol ontbreekt. Een nieuw token kan helpen; een operator moet het oplossen als het blijft duren.
+  if (tokenBron && (antwoord.status === 401 || antwoord.status === 403)) tokenBron.vergeet();
   return { soort: 'TIJDELIJK', reden: `werkorder-api antwoordde ${antwoord.status}` };
 }
 

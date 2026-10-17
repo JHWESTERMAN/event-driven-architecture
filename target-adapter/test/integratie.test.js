@@ -19,7 +19,7 @@ test.before(async () => {
   app = start({
     poort: 0, contractsDir,
     broker: { host: '127.0.0.1', port: brokerPoort, user: 'x', password: 'y', queue: 'eam.workorder.v1', dlq: 'eam.workorder.v1.dlq' },
-    api: { baseUrl: `http://127.0.0.1:${apiPoort}`, apiKey: 'sleutel', timeoutMs: 500 }
+    api: { baseUrl: `http://127.0.0.1:${apiPoort}`, apiKey: "sleutel", timeoutMs: 500 }
   }, (r) => logs.push(r));
   await wacht(() => app.consument.isVerbonden());
 });

@@ -44,6 +44,10 @@ const OIDC_AUDIENCE = process.env.OIDC_AUDIENCE || 'werkorders-api';
 
 const JWKS_CACHE_MS = 10 * 60 * 1000;                                           // sleutels zo lang bewaren
 const JWKS_MIN_INTERVAL_MS = Number(process.env.OIDC_JWKS_MIN_INTERVAL_MS) || 30 * 1000; // bij onbekende sleutel: niet vaker ophalen
+// Interne schrijf-API: de target-adapter logt in als service-account (client credentials). Zijn token moet van deze client
+// komen (azp) en deze realmrol hebben. Monteur-tokens komen daar dus nooit doorheen.
+const OIDC_SERVICE_CLIENT = process.env.OIDC_SERVICE_CLIENT || 'target-adapter';
+const OIDC_SERVICE_ROLE = process.env.OIDC_SERVICE_ROLE || 'werkorder-schrijver';
 const KLOK_MARGE_S = 5;
 const TOKEN_MONTEUR_PATROON = /^M-\d+$/;
 
@@ -116,8 +120,8 @@ function decodeerJson(deel) {
   return JSON.parse(Buffer.from(deel, 'base64url').toString('utf8'));
 }
 
-// Geeft { sub, monteurId, naam, exp } terug, of gooit een TokenFout.
-async function verifieerToken(token) {
+// Controleert handtekening, uitgever, doelgroep en geldigheid. Geeft de claims terug, of gooit een TokenFout.
+async function verifieerJwt(token) {
   if (typeof token !== 'string' || token.length === 0 || token.length > 8192) {
     throw new TokenFout('token ontbreekt of is te lang');
   }
@@ -160,6 +164,13 @@ async function verifieerToken(token) {
   if (!Number.isFinite(claims.exp) || claims.exp + KLOK_MARGE_S <= nu) throw new TokenFout('token is verlopen');
   if (Number.isFinite(claims.nbf) && claims.nbf - KLOK_MARGE_S > nu) throw new TokenFout('token is nog niet geldig');
 
+  return claims;
+}
+
+// Gebruikerstoken van een monteur. Geeft { sub, monteurId, naam, exp } terug, of gooit een TokenFout.
+async function verifieerToken(token) {
+  const claims = await verifieerJwt(token);
+
   // Keycloak bewaart gebruikersnamen in kleine letters: m-017 hoort bij monteur M-017
   const monteurId = typeof claims.preferred_username === 'string' ? claims.preferred_username.toUpperCase() : '';
   if (!TOKEN_MONTEUR_PATROON.test(monteurId)) throw new TokenFout('token bevat geen geldig monteur-id');
@@ -170,6 +181,15 @@ async function verifieerToken(token) {
     naam: typeof claims.name === 'string' ? claims.name : null,
     exp: claims.exp
   };
+}
+
+// Token van het service-account van de target-adapter. Geeft { client } terug, of gooit een TokenFout.
+async function verifieerServiceToken(token) {
+  const claims = await verifieerJwt(token);
+  if (claims.azp !== OIDC_SERVICE_CLIENT) throw new TokenFout(`token is niet uitgegeven aan client '${OIDC_SERVICE_CLIENT}'`);
+  const rollen = claims.realm_access && Array.isArray(claims.realm_access.roles) ? claims.realm_access.roles : [];
+  if (!rollen.includes(OIDC_SERVICE_ROLE)) throw new TokenFout(`rol '${OIDC_SERVICE_ROLE}' ontbreekt`, 'ONTBREKENDE_ROL');
+  return { client: claims.azp, exp: claims.exp };
 }
 // ===== einde OIDC-tokenvalidatie =====
 
@@ -239,11 +259,13 @@ async function authenticeer(req, res) {
 
 // ---------------------------------------------------------------
 // Interne schrijf-API
-//   PUT /intern/werkorders/{id}   header X-Api-Key; body: zie intern.js en openapi.yaml
-// Beveiliging: gedeelde sleutel (PoC). In productie: service-account via Keycloak (client credentials) of mTLS.
+//   PUT /intern/werkorders/{id}   header Authorization: Bearer <token>; body: zie intern.js en openapi.yaml
+// Beveiliging: Bearer-token van het service-account target-adapter (Keycloak, client credentials) met de rol werkorder-schrijver.
+// Voor lokaal gebruik zonder Keycloak kan INTERN_API_KEY nog; laat die in omgevingen met Keycloak weg.
 // ---------------------------------------------------------------
 function sleutelKlopt(req) {
   const gegeven = Buffer.from(String(req.headers['x-api-key'] || ''));
+  if (!INTERN_API_KEY) return false;
   const verwacht = Buffer.from(INTERN_API_KEY);
   return gegeven.length === verwacht.length && crypto.timingSafeEqual(gegeven, verwacht);
 }
@@ -261,13 +283,35 @@ function leesBody(req) {
   });
 }
 
+// Bearer-token van het service-account (voorkeur) of, als INTERN_API_KEY is gezet, de gedeelde sleutel (alleen voor lokaal gebruik
+// zonder Keycloak). Geeft true als de aanroeper erin mag; anders is het antwoord al verstuurd.
+async function autoriseerIntern(req, res) {
+  const token = haalBearerToken(req);
+  if (token) {
+    try {
+      const wie = await verifieerServiceToken(token);
+      req.monteurId = `service:${wie.client}`;
+      return true;
+    } catch (fout) {
+      if (!(fout instanceof TokenFout)) throw fout;
+      if (fout.soort === 'ONBESCHIKBAAR') {
+        console.error(`Service-token kon niet worden gecontroleerd: ${fout.message}`);
+        stuurFout(res, 503, 'Service Unavailable', 'Inloggen is tijdelijk niet beschikbaar', { 'Retry-After': '5' });
+        return false;
+      }
+      console.warn(`Service-token geweigerd: ${fout.message}`);
+      if (fout.soort === 'ONTBREKENDE_ROL') stuurFout(res, 403, 'Forbidden', 'Dit account mag geen werkorders schrijven');
+      else stuurFout(res, 401, 'Unauthorized', 'Het token is ongeldig of verlopen', { 'WWW-Authenticate': 'Bearer realm="werkorders", error="invalid_token"' });
+      return false;
+    }
+  }
+  if (INTERN_API_KEY && sleutelKlopt(req)) { req.monteurId = 'service:api-key'; return true; }
+  stuurFout(res, 401, 'Unauthorized', 'Stuur een Bearer-token van het service-account mee', { 'WWW-Authenticate': 'Bearer realm="werkorders"' });
+  return false;
+}
+
 async function verwerkIntern(req, res, pad) {
-  if (!INTERN_API_KEY) {
-    return stuurFout(res, 503, 'Service Unavailable', 'De interne API is niet geconfigureerd (INTERN_API_KEY ontbreekt)');
-  }
-  if (!sleutelKlopt(req)) {
-    return stuurFout(res, 401, 'Unauthorized', 'Ongeldige of ontbrekende API-sleutel');
-  }
+  if (!(await autoriseerIntern(req, res))) return;
   const m = pad.match(/^\/intern\/werkorders\/([^/]+)$/);
   if (!m) return stuurFout(res, 404, 'Not Found', `Onbekend pad: ${pad}`);
   if (req.method !== 'PUT') return stuurFout(res, 405, 'Method Not Allowed', `${req.method} wordt niet ondersteund`, { Allow: 'PUT' });
