@@ -11,18 +11,29 @@ Configuratie voor de taakgerichte broker (Apache ActiveMQ Artemis, image `apache
 | Pogingen | `max-delivery-attempts` 5 |
 | Herlevering | 2 s, daarna x2, maximaal 60 s |
 | Auto-aanmaken | uit voor `eam.workorder.v1` en `.dlq`; de queues bestaan dus alleen zoals hier gedefinieerd |
-| Protocollen | CORE en AMQP 1.0 op poort 61616 |
+| Protocollen | CORE en AMQP 1.0 op poort 61616, alleen via TLS (PKCS12-keystore, TLS 1.2/1.3) |
 | Webconsole | http://localhost:8161 (alleen localhost) |
 
 ## Starten en controleren
 
 ```bash
+./scripts/kluis.sh klaarzetten               # eenmalig: geheimen uit de kluis naar secrets/ en TLS-certificaten
 docker compose up -d artemis
-docker compose logs artemis --tail 30        # zoek naar "Server is now live" en geen fouten over broker.xml
-docker compose exec artemis /var/lib/artemis-instance/bin/artemis queue stat --user artemis --password artemis
+docker compose logs artemis --tail 30        # zoek naar "Server is now live" en geen fouten over broker.xml of de keystore
 ```
 
-`queue stat` hoort `eam.workorder.v1` en `eam.workorder.v1.dlq` te tonen.
+De queues en berichten zie je in de console op http://localhost:8161 (gebruiker `artemis`, wachtwoord in `secrets/artemis_admin_password`).
+De opdrachtregel-CLI (`artemis queue stat`) heeft een TLS-URL met truststore nodig en is daarom hier niet de aanbevolen weg.
+
+## TLS en geheimen
+
+- `broker.xml` heeft `sslEnabled=true` en de plaatshouder `@KEYSTORE_PASSWORD@`. `init-users.sh` vult die in met het wachtwoord uit `KEYSTORE_PASSWORD_FILE`, kopieert
+  de keystore (`TLS_KEYSTORE`, standaard `/tls/broker.p12`) naar `etc-override/broker.p12` en zet alle bestanden op `0640` voor uid 1001.
+- Wachtwoorden van de drie gebruikers komen uit `ADMIN_PASSWORD_FILE`, `SOURCE_PASSWORD_FILE` en `TARGET_PASSWORD_FILE` (of de variabele zonder `_FILE`).
+  Het keystore-wachtwoord mag alleen letters, cijfers en `. _ ~ -` bevatten, omdat het in de acceptor-URL staat.
+- De image maakt bij het aanmaken van de instance één opstartgebruiker uit `ARTEMIS_USER`/`ARTEMIS_PASSWORD`; in Compose is dat de waardeloze gebruiker `bootstrap`.
+  `etc-override` vervangt daarna het gebruikersbestand, dus die gebruiker kan niet inloggen (de rooktest controleert dat).
+- Certificaten maken: `scripts/maak-certs.sh` (lokale CA, servercertificaat voor `artemis`, `localhost` en de k8s-namen).
 
 ## Een wijziging in broker.xml laten werken
 
@@ -37,7 +48,7 @@ docker compose rm -sf artemis && docker volume rm $(docker volume ls -q | grep a
 
 | Gebruiker | Rol | Mag |
 |---|---|---|
-| `ARTEMIS_USER` (console, rooktest) | `amq` | alles |
+| `artemis` (console, rooktest) | `amq` | alles |
 | `SOURCE_ADAPTER_BROKER_USER` | `eam-source` | alleen versturen naar `eam.workorder.v1` |
 | `TARGET_ADAPTER_BROKER_USER` | `eam-target` | ontvangen van `eam.workorder.v1`, versturen naar `eam.workorder.v1.dlq` |
 
@@ -49,4 +60,4 @@ bij wijzigingen `docker compose down -v` (of het StatefulSet en de PVC verwijder
 
 Het bestand is afgeleid van het standaard `broker.xml` van Artemis en is getest met `scripts/smoketest.sh --volledig` tegen Artemis 2.57.0
 (queue, dead letter address, herlevering, uitputting van de pogingen, ontdubbeling op `_AMQ_DUPL_ID`).
-Nog open: aparte gebruikers en rollen per adapter (nu een rol `amq` met alle rechten).
+Gebruikers en rollen per adapter, TLS en geheimen uit een kluis zijn gedaan (zie hierboven). Nog open: certificaten van de CA van de organisatie, rotatie zonder het volume te wissen, en TLS op de webconsole.
