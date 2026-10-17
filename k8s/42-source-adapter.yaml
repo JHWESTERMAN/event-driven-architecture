@@ -1,0 +1,84 @@
+# source-adapter: zie source-adapter/README.md. Praat met Artemis over AMQP 1.0; het schema zit in de image.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: source-adapter
+  namespace: werkorder
+  labels:
+    app: source-adapter
+    app.kubernetes.io/part-of: werkorder-eda
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: source-adapter
+  template:
+    metadata:
+      labels:
+        app: source-adapter
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: source-adapter
+          image: REGISTRY/source-adapter:IMAGE_TAG
+          ports:
+            - name: http
+              containerPort: 8090
+          env:
+            - name: PORT
+              value: "8090"
+            - name: BROKER_HOST
+              value: artemis
+            - name: BROKER_PORT
+              value: "61616"
+            - name: BROKER_QUEUE
+              value: eam.workorder.v1
+            - name: BROKER_USER
+              valueFrom:
+                secretKeyRef: { name: artemis-credentials, key: user }
+            - name: BROKER_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: artemis-credentials, key: password }
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8090
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8090
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 6          # een tijdelijke brokeruitval mag de pod niet meteen herstarten
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: source-adapter
+  namespace: werkorder
+  labels:
+    app: source-adapter
+    app.kubernetes.io/part-of: werkorder-eda
+spec:
+  selector:
+    app: source-adapter
+  ports:
+    - name: http
+      port: 8090
+      targetPort: 8090

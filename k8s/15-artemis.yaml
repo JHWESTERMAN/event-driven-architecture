@@ -1,0 +1,108 @@
+# ActiveMQ Artemis (taakgerichte broker), één node met een eigen schijf voor het journal.
+# De broker-configuratie (queue, dead letter address, herlevering) komt uit de ConfigMap artemis-etc-override,
+# die deploy.sh maakt uit artemis/etc-override/. Let op: Artemis leest die map alleen bij het AANMAKEN van de instance.
+# Na een wijziging van broker.xml dus: StatefulSet en PVC verwijderen (zie artemis/README.md).
+# Gebruikersnaam en wachtwoord: Secret artemis-credentials (door deploy.sh aangemaakt, nooit in git).
+apiVersion: v1
+kind: Service
+metadata:
+  name: artemis
+  namespace: werkorder
+  labels:
+    app: artemis
+    app.kubernetes.io/part-of: werkorder-eda
+spec:
+  selector:
+    app: artemis
+  ports:
+    - name: amqp          # CORE en AMQP 1.0 op dezelfde poort
+      port: 61616
+      targetPort: 61616
+    - name: console
+      port: 8161
+      targetPort: 8161
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: artemis
+  namespace: werkorder
+  labels:
+    app: artemis
+    app.kubernetes.io/part-of: werkorder-eda
+spec:
+  serviceName: artemis
+  replicas: 1
+  selector:
+    matchLabels:
+      app: artemis
+  template:
+    metadata:
+      labels:
+        app: artemis
+    spec:
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        fsGroup: 1001          # de gebruiker "artemis" in de image mag naar de schijf schrijven
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: artemis
+          image: apache/artemis:2.57.0
+          env:
+            - name: ARTEMIS_USER
+              valueFrom:
+                secretKeyRef: { name: artemis-credentials, key: user }
+            - name: ARTEMIS_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: artemis-credentials, key: password }
+            - name: EXTRA_ARGS
+              value: "--http-host 0.0.0.0 --relax-jolokia --java-memory 512M"
+          ports:
+            - name: amqp
+              containerPort: 61616
+            - name: console
+              containerPort: 8161
+          resources:
+            requests:
+              cpu: 100m
+              memory: 768Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          startupProbe:
+            tcpSocket:
+              port: 61616
+            periodSeconds: 5
+            failureThreshold: 36
+          readinessProbe:
+            tcpSocket:
+              port: 61616
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 61616
+            periodSeconds: 20
+            failureThreshold: 6
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/artemis-instance
+            - name: etc-override
+              mountPath: /var/lib/artemis-instance/etc-override
+              readOnly: true
+      volumes:
+        - name: etc-override
+          configMap:
+            name: artemis-etc-override
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 2Gi

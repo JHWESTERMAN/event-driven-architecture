@@ -8,7 +8,9 @@ metadata:
     app: werkorder-api
     app.kubernetes.io/part-of: werkorder-eda
 spec:
-  replicas: 1
+  replicas: 1                # SQLite: één schrijver
+  strategy:
+    type: Recreate           # een tweede pod mag nooit tegelijk dezelfde schijf gebruiken
   selector:
     matchLabels:
       app: werkorder-api
@@ -20,6 +22,7 @@ spec:
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
+        fsGroup: 1000            # schrijfrechten op de schijf met het SQLite-bestand
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -37,13 +40,23 @@ spec:
               value: http://keycloak:8080/realms/werkorders/protocol/openid-connect/certs
             - name: OIDC_AUDIENCE
               value: werkorders-api
+            - name: DB_PATH
+              value: /data/werkorders.db
+            - name: KAFKA_BROKER             # de outbox-relay publiceert hiernaartoe
+              value: redpanda:9092
+            - name: INTERN_API_KEY
+              valueFrom:
+                secretKeyRef: { name: intern-api-key, key: key }
           resources:
             requests:
               cpu: 25m
-              memory: 48Mi
+              memory: 96Mi
             limits:
-              cpu: 200m
-              memory: 128Mi
+              cpu: 300m
+              memory: 192Mi
+          volumeMounts:
+            - name: data
+              mountPath: /data
           readinessProbe:
             httpGet:
               path: /health
@@ -58,6 +71,24 @@ spec:
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: werkorder-api-data
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: werkorder-api-data
+  namespace: werkorder
+  labels:
+    app: werkorder-api
+    app.kubernetes.io/part-of: werkorder-eda
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
 ---
 apiVersion: v1
 kind: Service
