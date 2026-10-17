@@ -14,6 +14,11 @@
   "internationalizationEnabled": true,
   "supportedLocales": ["nl", "en"],
   "defaultLocale": "nl",
+  "roles": {
+    "realm": [
+      { "name": "werkorder-schrijver", "description": "Mag werkorders schrijven via de interne API (alleen het service-account van de target-adapter)" }
+    ]
+  },
   "clients": [
     {
       "clientId": "monteur-app",
@@ -72,6 +77,34 @@
           }
         }
       ]
+    },
+    {
+      "clientId": "target-adapter",
+      "name": "Target-adapter",
+      "description": "Service-account van de target-adapter. Logt in met client credentials en mag werkorders schrijven via /intern. Het geheim komt uit de omgeving van Keycloak (TARGET_ADAPTER_CLIENT_SECRET).",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${TARGET_ADAPTER_CLIENT_SECRET}",
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "protocolMappers": [
+        {
+          "name": "werkorders-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "werkorders-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
     }
   ],
   "users": [
@@ -92,6 +125,7 @@
       "lastName": "Jansen",
       "email": "s.jansen@example.com",
       "credentials": [{ "type": "password", "value": "welkom022", "temporary": false }]
-    }
+    },
+    { "username": "service-account-target-adapter", "enabled": true, "serviceAccountClientId": "target-adapter", "realmRoles": ["werkorder-schrijver"] }
   ]
 }

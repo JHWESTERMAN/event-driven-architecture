@@ -1,0 +1,17 @@
+{
+  "envelope": {
+    "messageId": "5b8e1d90-2f47-4a6c-8c13-9d0e7a4b6f22",
+    "correlationId": "5b8e1d90-2f47-4a6c-8c13-9d0e7a4b6f22",
+    "type": "eam.workorder.cancelled",
+    "schemaVersion": "1.0",
+    "sourceSystem": "OMS",
+    "occurredAt": "2026-10-17T10:05:00Z",
+    "version": 3
+  },
+  "workOrder": {
+    "id": "WO-1002",
+    "sourceReference": "WOP-001002",
+    "status": "CANCELLED",
+    "cancellationReason": "DUPLICATE"
+  }
+}

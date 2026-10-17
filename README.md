@@ -13,6 +13,12 @@ Dit is het patroon *event notification + ophalen* (dun event, synchroon detail).
 een event-driven omgeving omgaat met contracten, validatie, gerichte levering en foutafhandeling (poison messages,
 dead letter topic).
 
+> **In uitbreiding:** de keten krijgt een taakgerichte broker (Apache ActiveMQ Artemis), een bronapp met een eigen interface,
+> twee adapters en een canoniek EAM-datamodel. Zie [`docs/architectuur-review.md`](docs/architectuur-review.md) voor de review en het
+> doelontwerp, [`contracts/`](contracts/README.md) voor de schema's, [`bron-app/`](bron-app/server.js) voor de bronapp en
+> [`artemis/`](artemis/README.md) voor de broker. `producer.js` (kapot) is verwijderd; de bron-app vervangt hem.
+> Test de keten met `./scripts/smoketest.sh` (of `--volledig` voor uitval- en herstelscenario's).
+
 ## Architectuur
 
 ```
@@ -60,10 +66,10 @@ event-driven-architecture/
 ├── werkorder-api/              # synchrone API
 │   ├── Dockerfile
 │   ├── package.json
-│   ├── server.js               # REST-endpoints met tokencontrole en eigenaarscheck (alleen Node.js-standaardbibliotheek)
+│   ├── server.js, db.js, ...   # REST-endpoints, SQLite-opslag, interne PUT, outbox-relay (zie werkorder-api/README.md)
 │   └── openapi.yaml            # het contract van de API
 ├── k8s/                        # Kubernetes-manifests voor AKS
-│   ├── 00-namespace.yaml ... 60-keycloak.yaml
+│   ├── 00-namespace.yaml ... 60-keycloak.yaml   # incl. 15-artemis, 42/43 adapters, 44 bron-app
 │   ├── gateway/nginx.conf      # nginx-configuratie voor in het cluster
 │   ├── optioneel-publiek.yaml  # optioneel: openbaar IP-adres, beperkt tot jouw IP
 │   └── deploy.sh               # bouwt de images in ACR en zet alles in het cluster
@@ -681,12 +687,16 @@ heartbeat van de service (elke 30 seconden) houdt de WebSocket-verbindingen leve
 |---|---|---|
 | redpanda | 1 GiB | 1,5 GiB |
 | ws-microservice | 96 MiB | 192 MiB |
-| werkorder-api | 48 MiB | 128 MiB |
+| werkorder-api (met SQLite en kafkajs) | 96 MiB | 192 MiB |
 | api-gateway | 16 MiB | 64 MiB |
 | keycloak | 640 MiB | 1 GiB |
-| **Totaal** | **circa 1,8 GiB** | **circa 2,9 GiB** |
+| artemis | 768 MiB | 1 GiB |
+| source-adapter | 64 MiB | 128 MiB |
+| target-adapter | 64 MiB | 128 MiB |
+| bron-app | 32 MiB | 96 MiB |
+| **Totaal** | **circa 2,8 GiB** | **circa 4,4 GiB** |
 
-Een node van 8 GiB houdt na Kubernetes zelf (systeempods en gereserveerd geheugen; reken op 5 tot 6 GiB bruikbaar)
+Met de taakgerichte keten (Artemis, twee adapters, bron-app) is dit krapper dan voorheen: controleer met `kubectl top pods`. Een node van 8 GiB houdt na Kubernetes zelf (systeempods en gereserveerd geheugen; reken op 5 tot 6 GiB bruikbaar)
 daar ruimte voor over. Keycloak is de zwaarste: het opstarten in `start-dev` heeft een korte piek, vandaar het limiet van 1 GiB.
 
 ### Kosten en opruimen
@@ -726,7 +736,7 @@ en de inhaalbuffer van `ws-microservice` zijn dan leeg. Stel in Azure Cost Manag
 | Keycloak start niet, of wordt steeds afgesloten | te weinig geheugen, of fout in `compose-snippet.yml` | `docker compose logs keycloak --tail 40`; controleer de inspringing en of Docker Desktop minstens 4 GB geheugen heeft |
 | Op AKS: inloggen mislukt of de pagina van Keycloak laadt niet | de tweede `port-forward` (`svc/keycloak 8180:8080`) draait niet | start hem; de app en Keycloak hebben elk hun eigen `port-forward` nodig |
 | Op AKS: Keycloak pod blijft `Starting` of `OOMKilled` | start-dev heeft een geheugenpiek bij het opstarten | `kubectl -n werkorder describe pod -l app=keycloak`; verhoog het limiet in `60-keycloak.yaml` naar 1,5Gi en `-Xmx` mee |
-| Melding komt aan, detail zegt "Werkorder niet gevonden" | het id staat niet in de voorbeelddata (alleen WO-1001 t/m WO-1003) | gebruik een bestaand id, of voeg de werkorder toe in `werkorder-api/server.js` |
+| Melding komt aan, detail zegt "Werkorder niet gevonden" | het id staat niet in de voorbeelddata (alleen WO-1001 t/m WO-1003) | gebruik een bestaand id (WO-1001 t/m WO-1003 komen uit `werkorder-api/seed.js`, andere ontstaan via de bron-app en de adapters) |
 | Melding komt aan, detail zegt "Geen toegang" | de werkorder is van een andere monteur (bijvoorbeeld WO-1003 voor M-017) | dat is de eigenaarscheck die werkt; stuur het bericht met een werkorder van de juiste monteur (M-017: WO-1001 en WO-1002, M-022: WO-1003) |
 | Meldingen zijn weg na wisselen van monteur of herladen | de lijst stond alleen in het geheugen van de pagina (oudere versie van de app) | gebruik de huidige `monteur-app.html`: die bewaart de lijst in `localStorage` en haalt gemiste meldingen in |
 | Na herstart van `ws-microservice` komen oude meldingen niet terug | de inhaalbuffer leeft in het geheugen | bekende beperking, zie "Inhalen van gemiste meldingen" |

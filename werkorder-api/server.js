@@ -2,57 +2,18 @@ const http = require('http');
 
 const PORT = process.env.PORT || 8081;
 
-// ---------------------------------------------------------------
-// Voorbeelddata (in een echte situatie komt dit uit het werkordersysteem)
-// De werkorder is de "volledige" versie; het Kafka-event bevat alleen id, status en bericht.
-// Let op: "taken" en "materiaal" zijn lijsten (kardinaliteit 0..*)
-// ---------------------------------------------------------------
-const WERKORDERS = {
-  'WO-1001': {
-    werkorderId: 'WO-1001',
-    status: 'OPEN',
-    prioriteit: 'HOOG',
-    omschrijving: 'Storing wissel 214, wisselmotor reageert niet',
-    locatie: { plaats: 'Breda', spoorEmplacement: 'Breda Noord', coordinaten: { lat: 51.6, lon: 4.78 } },
-    monteur: { id: 'M-017', naam: 'J. de Vries' },
-    aangemaaktOp: '2026-10-16T06:12:00Z',
-    taken: [
-      { taakId: 'T-1', omschrijving: 'Wissel veiligstellen', gereed: true },
-      { taakId: 'T-2', omschrijving: 'Wisselmotor controleren', gereed: false },
-      { taakId: 'T-3', omschrijving: 'Rapport invullen', gereed: false }
-    ],
-    materiaal: [
-      { artikelnr: 'WM-204', omschrijving: 'Wisselmotor 220V', aantal: 1 }
-    ]
-  },
-  'WO-1002': {
-    werkorderId: 'WO-1002',
-    status: 'IN_BEHANDELING',
-    prioriteit: 'NORMAAL',
-    omschrijving: 'Seinlamp vervangen',
-    locatie: { plaats: 'Tilburg', spoorEmplacement: 'Tilburg West', coordinaten: { lat: 51.56, lon: 5.08 } },
-    monteur: { id: 'M-017', naam: 'J. de Vries' },
-    aangemaaktOp: '2026-10-16T07:40:00Z',
-    taken: [
-      { taakId: 'T-1', omschrijving: 'Lamp vervangen', gereed: false }
-    ],
-    materiaal: []
-  },
-  'WO-1003': {
-    werkorderId: 'WO-1003',
-    status: 'AFGEROND',
-    prioriteit: 'LAAG',
-    omschrijving: 'Jaarlijkse inspectie overweg',
-    locatie: { plaats: 'Eindhoven', spoorEmplacement: 'Eindhoven Zuid', coordinaten: { lat: 51.43, lon: 5.48 } },
-    monteur: { id: 'M-022', naam: 'S. Jansen' },
-    aangemaaktOp: '2026-10-15T13:05:00Z',
-    taken: [
-      { taakId: 'T-1', omschrijving: 'Inspectie uitvoeren', gereed: true },
-      { taakId: 'T-2', omschrijving: 'Rapport indienen', gereed: true }
-    ],
-    materiaal: []
-  }
-};
+const { maakStore } = require('./db');
+const { valideerPut } = require('./intern');
+const { maakRelay } = require('./outbox');
+const { WERKORDERS: SEED } = require('./seed');
+const crypto = require('crypto');
+
+// Opslag: SQLite. In Compose staat het bestand op een volume (/data); ':memory:' gebruiken we in tests.
+const DB_PATH = process.env.DB_PATH || './data/werkorders.db';
+if (DB_PATH !== ':memory:') require('fs').mkdirSync(require('path').dirname(DB_PATH), { recursive: true });
+const store = maakStore({ pad: DB_PATH, seed: SEED });
+const INTERN_API_KEY = process.env.INTERN_API_KEY || '';
+const MAX_BODY = 256 * 1024;
 
 const TOEGESTANE_STATUSSEN = ['OPEN', 'IN_BEHANDELING', 'AFGEROND'];
 const ID_PATROON = /^WO-\d+$/;
@@ -67,7 +28,6 @@ const ID_PATROON = /^WO-\d+$/;
 //   - het monteur-id komt uit de gebruikersnaam in het token (M-017 staat in Keycloak als m-017)
 // Het token wordt hier nooit gelogd.
 // ===============================================================
-const crypto = require('crypto');
 
 if (typeof fetch !== 'function') {
   console.error('Deze service heeft Node.js 18 of hoger nodig (fetch ontbreekt)');
@@ -84,6 +44,10 @@ const OIDC_AUDIENCE = process.env.OIDC_AUDIENCE || 'werkorders-api';
 
 const JWKS_CACHE_MS = 10 * 60 * 1000;                                           // sleutels zo lang bewaren
 const JWKS_MIN_INTERVAL_MS = Number(process.env.OIDC_JWKS_MIN_INTERVAL_MS) || 30 * 1000; // bij onbekende sleutel: niet vaker ophalen
+// Interne schrijf-API: de target-adapter logt in als service-account (client credentials). Zijn token moet van deze client
+// komen (azp) en deze realmrol hebben. Monteur-tokens komen daar dus nooit doorheen.
+const OIDC_SERVICE_CLIENT = process.env.OIDC_SERVICE_CLIENT || 'target-adapter';
+const OIDC_SERVICE_ROLE = process.env.OIDC_SERVICE_ROLE || 'werkorder-schrijver';
 const KLOK_MARGE_S = 5;
 const TOKEN_MONTEUR_PATROON = /^M-\d+$/;
 
@@ -156,8 +120,8 @@ function decodeerJson(deel) {
   return JSON.parse(Buffer.from(deel, 'base64url').toString('utf8'));
 }
 
-// Geeft { sub, monteurId, naam, exp } terug, of gooit een TokenFout.
-async function verifieerToken(token) {
+// Controleert handtekening, uitgever, doelgroep en geldigheid. Geeft de claims terug, of gooit een TokenFout.
+async function verifieerJwt(token) {
   if (typeof token !== 'string' || token.length === 0 || token.length > 8192) {
     throw new TokenFout('token ontbreekt of is te lang');
   }
@@ -200,6 +164,13 @@ async function verifieerToken(token) {
   if (!Number.isFinite(claims.exp) || claims.exp + KLOK_MARGE_S <= nu) throw new TokenFout('token is verlopen');
   if (Number.isFinite(claims.nbf) && claims.nbf - KLOK_MARGE_S > nu) throw new TokenFout('token is nog niet geldig');
 
+  return claims;
+}
+
+// Gebruikerstoken van een monteur. Geeft { sub, monteurId, naam, exp } terug, of gooit een TokenFout.
+async function verifieerToken(token) {
+  const claims = await verifieerJwt(token);
+
   // Keycloak bewaart gebruikersnamen in kleine letters: m-017 hoort bij monteur M-017
   const monteurId = typeof claims.preferred_username === 'string' ? claims.preferred_username.toUpperCase() : '';
   if (!TOKEN_MONTEUR_PATROON.test(monteurId)) throw new TokenFout('token bevat geen geldig monteur-id');
@@ -210,6 +181,15 @@ async function verifieerToken(token) {
     naam: typeof claims.name === 'string' ? claims.name : null,
     exp: claims.exp
   };
+}
+
+// Token van het service-account van de target-adapter. Geeft { client } terug, of gooit een TokenFout.
+async function verifieerServiceToken(token) {
+  const claims = await verifieerJwt(token);
+  if (claims.azp !== OIDC_SERVICE_CLIENT) throw new TokenFout(`token is niet uitgegeven aan client '${OIDC_SERVICE_CLIENT}'`);
+  const rollen = claims.realm_access && Array.isArray(claims.realm_access.roles) ? claims.realm_access.roles : [];
+  if (!rollen.includes(OIDC_SERVICE_ROLE)) throw new TokenFout(`rol '${OIDC_SERVICE_ROLE}' ontbreekt`, 'ONTBREKENDE_ROL');
+  return { client: claims.azp, exp: claims.exp };
 }
 // ===== einde OIDC-tokenvalidatie =====
 
@@ -276,6 +256,92 @@ async function authenticeer(req, res) {
   }
 }
 
+
+// ---------------------------------------------------------------
+// Interne schrijf-API
+//   PUT /intern/werkorders/{id}   header Authorization: Bearer <token>; body: zie intern.js en openapi.yaml
+// Beveiliging: Bearer-token van het service-account target-adapter (Keycloak, client credentials) met de rol werkorder-schrijver.
+// Voor lokaal gebruik zonder Keycloak kan INTERN_API_KEY nog; laat die in omgevingen met Keycloak weg.
+// ---------------------------------------------------------------
+function sleutelKlopt(req) {
+  const gegeven = Buffer.from(String(req.headers['x-api-key'] || ''));
+  if (!INTERN_API_KEY) return false;
+  const verwacht = Buffer.from(INTERN_API_KEY);
+  return gegeven.length === verwacht.length && crypto.timingSafeEqual(gegeven, verwacht);
+}
+
+function leesBody(req) {
+  return new Promise((resolve, reject) => {
+    const delen = []; let n = 0;
+    req.on('data', (d) => {
+      n += d.length;
+      if (n > MAX_BODY) { reject(Object.assign(new Error('te groot'), { status: 413 })); req.destroy(); return; }
+      delen.push(d);
+    });
+    req.on('end', () => resolve(Buffer.concat(delen).toString('utf8')));
+    req.on('error', reject);
+  });
+}
+
+// Bearer-token van het service-account (voorkeur) of, als INTERN_API_KEY is gezet, de gedeelde sleutel (alleen voor lokaal gebruik
+// zonder Keycloak). Geeft true als de aanroeper erin mag; anders is het antwoord al verstuurd.
+async function autoriseerIntern(req, res) {
+  const token = haalBearerToken(req);
+  if (token) {
+    try {
+      const wie = await verifieerServiceToken(token);
+      req.monteurId = `service:${wie.client}`;
+      return true;
+    } catch (fout) {
+      if (!(fout instanceof TokenFout)) throw fout;
+      if (fout.soort === 'ONBESCHIKBAAR') {
+        console.error(`Service-token kon niet worden gecontroleerd: ${fout.message}`);
+        stuurFout(res, 503, 'Service Unavailable', 'Inloggen is tijdelijk niet beschikbaar', { 'Retry-After': '5' });
+        return false;
+      }
+      console.warn(`Service-token geweigerd: ${fout.message}`);
+      if (fout.soort === 'ONTBREKENDE_ROL') stuurFout(res, 403, 'Forbidden', 'Dit account mag geen werkorders schrijven');
+      else stuurFout(res, 401, 'Unauthorized', 'Het token is ongeldig of verlopen', { 'WWW-Authenticate': 'Bearer realm="werkorders", error="invalid_token"' });
+      return false;
+    }
+  }
+  if (INTERN_API_KEY && sleutelKlopt(req)) { req.monteurId = 'service:api-key'; return true; }
+  stuurFout(res, 401, 'Unauthorized', 'Stuur een Bearer-token van het service-account mee', { 'WWW-Authenticate': 'Bearer realm="werkorders"' });
+  return false;
+}
+
+async function verwerkIntern(req, res, pad) {
+  if (!(await autoriseerIntern(req, res))) return;
+  const m = pad.match(/^\/intern\/werkorders\/([^/]+)$/);
+  if (!m) return stuurFout(res, 404, 'Not Found', `Onbekend pad: ${pad}`);
+  if (req.method !== 'PUT') return stuurFout(res, 405, 'Method Not Allowed', `${req.method} wordt niet ondersteund`, { Allow: 'PUT' });
+
+  let id;
+  try { id = decodeURIComponent(m[1]); } catch (e) { return stuurFout(res, 400, 'Bad Request', 'Ongeldig id (verkeerde codering)'); }
+  if (!ID_PATROON.test(id)) return stuurFout(res, 400, 'Bad Request', `Ongeldig id '${id}'`);
+
+  if (!/^application\/json\b/i.test(req.headers['content-type'] || '')) {
+    return stuurFout(res, 415, 'Unsupported Media Type', 'Content-Type moet application/json zijn');
+  }
+  let tekst;
+  try { tekst = await leesBody(req); } catch (e) {
+    return stuurFout(res, e.status || 400, e.status === 413 ? 'Payload Too Large' : 'Bad Request', 'Body kon niet worden gelezen');
+  }
+  let body;
+  try { body = JSON.parse(tekst); } catch (e) { return stuurFout(res, 400, 'Bad Request', 'Body is geen geldige JSON'); }
+
+  const { fouten, invoer } = valideerPut(id, body);
+  if (fouten.length) {
+    return stuurJson(res, 422, { status: 422, title: 'Unprocessable Entity', detail: 'De werkorder voldoet niet aan het contract', fouten });
+  }
+  const r = store.verwerk(invoer);
+  console.log(JSON.stringify({
+    niveau: 'info', stap: 'opslaan', werkorderId: id, messageId: invoer.messageId, correlationId: invoer.correlationId || null,
+    versie: invoer.versie, resultaat: r.resultaat, reden: r.reden || undefined
+  }));
+  return stuurJson(res, 200, r);
+}
+
 // ---------------------------------------------------------------
 // Routes
 //   GET /health                      (zonder token)
@@ -286,13 +352,17 @@ async function verwerk(req, res) {
   const url = new URL(req.url, 'http://localhost');
   const pad = url.pathname.length > 1 ? url.pathname.replace(/\/+$/, '') : url.pathname;
 
+  // Interne schrijf-API (alleen voor de target-adapter; de gateway stuurt /intern niet door)
+  if (pad.startsWith('/intern/')) return verwerkIntern(req, res, pad);
+
   if (req.method !== 'GET') {
     return stuurFout(res, 405, 'Method Not Allowed', `${req.method} wordt niet ondersteund`, { Allow: 'GET' });
   }
 
   // Gezondheidscheck: bewust zonder token, zodat Kubernetes en Docker hem kunnen gebruiken
   if (pad === '/health') {
-    return stuurJson(res, 200, { status: 'UP' });
+    const relayStatus = relay ? relay.status() : null;
+    return stuurJson(res, 200, { status: 'UP', outbox: relayStatus });
   }
 
   if (pad !== '/api' && !pad.startsWith('/api/')) {
@@ -323,7 +393,7 @@ async function verwerk(req, res) {
     }
 
     // Je ziet alleen je eigen werkorders, ook in de lijst
-    let resultaat = Object.values(WERKORDERS).filter((w) => w.monteur.id === gebruiker.monteurId);
+    let resultaat = store.lijstVan(gebruiker.monteurId);
     if (status !== null) {
       resultaat = resultaat.filter((w) => w.status === status);
     }
@@ -333,7 +403,8 @@ async function verwerk(req, res) {
       werkorderId: w.werkorderId,
       status: w.status,
       prioriteit: w.prioriteit,
-      omschrijving: w.omschrijving
+      omschrijving: w.omschrijving,
+      ingetrokken: w.ingetrokken
     }));
 
     return stuurJson(res, 200, { totaal: resultaat.length, items }, { 'Cache-Control': 'no-store' });
@@ -353,15 +424,15 @@ async function verwerk(req, res) {
       return stuurFout(res, 400, 'Bad Request', `Ongeldig id '${id}' (verwacht: WO- gevolgd door cijfers)`);
     }
 
-    const werkorder = WERKORDERS[id];
+    const werkorder = store.haal(id);
     if (!werkorder) {
       return stuurFout(res, 404, 'Not Found', `Werkorder ${id} bestaat niet`);
     }
 
     // De eigenaarscheck: een geldig token is niet genoeg, de werkorder moet ook bij deze monteur horen.
     // Dit is de controle die voorkomt dat je andermans werkorders kunt lezen door een id te raden.
-    if (werkorder.monteur.id !== gebruiker.monteurId) {
-      console.warn(`Toegang geweigerd: ${gebruiker.monteurId} vroeg ${id} op (eigenaar: ${werkorder.monteur.id})`);
+    if (!werkorder.monteur || werkorder.monteur.id !== gebruiker.monteurId) {
+      console.warn(`Toegang geweigerd: ${gebruiker.monteurId} vroeg ${id} op (eigenaar: ${werkorder.monteur ? werkorder.monteur.id : 'niemand'})`);
       return stuurFout(res, 403, 'Forbidden', `Je hebt geen toegang tot werkorder ${id}`);
     }
 
@@ -389,6 +460,29 @@ const server = http.createServer((req, res) => {
   });
 });
 
-server.listen(PORT, () => {
-  console.log(`Werkorder-API gestart op poort ${PORT} (uitgever: ${OIDC_ISSUER}, doelgroep: ${OIDC_AUDIENCE})`);
-});
+// Outbox-relay: alleen als er een Kafka-broker is ingesteld (anders blijven events in de outbox staan)
+let relay = null;
+let publisher = null;
+if (process.env.KAFKA_BROKER) {
+  const { maakKafkaPublisher } = require('./publisher');
+  publisher = maakKafkaPublisher({ broker: process.env.KAFKA_BROKER });
+  relay = maakRelay({ store, publiceer: (b) => publisher.publiceer(b), interval: Number(process.env.OUTBOX_INTERVAL_MS || 1000) });
+  relay.start();
+}
+
+if (require.main === module) {
+  server.listen(PORT, () => {
+    console.log(`Werkorder-API gestart op poort ${PORT} (uitgever: ${OIDC_ISSUER}, doelgroep: ${OIDC_AUDIENCE}, database: ${DB_PATH}, outbox-relay: ${relay ? 'aan' : 'uit'})`);
+  });
+  const stop = async () => {
+    if (relay) relay.stop();
+    server.close();
+    if (publisher) await publisher.sluit();
+    store.sluit();
+    process.exit(0);
+  };
+  process.on('SIGTERM', stop);
+  process.on('SIGINT', stop);
+}
+
+module.exports = { server, store };

@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:eam-poc:eam:workorder:1.0",
+  "title": "Canoniek EAM-bericht: werkorder (versie 1.0)",
+  "description": "Het model dat bron en ontvanger delen. Engelse, neutrale veldnamen; tijden in UTC; coordinaten in WGS84; statusvocabulaire rijker dan dat van de monteurkant. Wordt door beide adapters gevalideerd. Dit schema is strikt (geen onbekende velden), zodat mapping-fouten in de adapter opvallen.",
+  "type": "object",
+  "required": ["envelope", "workOrder"],
+  "additionalProperties": false,
+  "properties": {
+    "envelope": { "$ref": "#/$defs/envelope" },
+    "workOrder": { "type": "object" }
+  },
+  "allOf": [
+    {
+      "if": {
+        "type": "object", "required": ["envelope"],
+        "properties": {
+          "envelope": {
+            "type": "object", "required": ["type"],
+            "properties": { "type": { "const": "eam.workorder.cancelled" } }
+          }
+        }
+      },
+      "then": { "properties": { "workOrder": { "$ref": "#/$defs/workOrderCancelled" } } },
+      "else": { "properties": { "workOrder": { "$ref": "#/$defs/workOrder" } } }
+    }
+  ],
+  "$defs": {
+    "envelope": {
+      "type": "object",
+      "required": ["messageId", "correlationId", "type", "schemaVersion", "sourceSystem", "occurredAt", "version"],
+      "additionalProperties": false,
+      "properties": {
+        "messageId": { "type": "string", "format": "uuid" },
+        "correlationId": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "type": { "enum": ["eam.workorder.created", "eam.workorder.updated", "eam.workorder.cancelled"] },
+        "schemaVersion": { "const": "1.0" },
+        "sourceSystem": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "occurredAt": { "type": "string", "format": "date-time", "pattern": "Z$" },
+        "version": { "description": "Versie van de werkorder; een lagere versie dan de opgeslagen wordt genegeerd", "type": "integer", "minimum": 1 }
+      }
+    },
+    "workOrderId": { "type": "string", "pattern": "^WO-[0-9]+$" },
+    "utc": { "type": "string", "format": "date-time", "pattern": "Z$" },
+    "workOrderCancelled": {
+      "type": "object",
+      "required": ["id", "sourceReference", "status", "cancellationReason"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/workOrderId" },
+        "sourceReference": { "type": "string", "minLength": 1 },
+        "status": { "const": "CANCELLED" },
+        "cancellationReason": { "enum": ["DUPLICATE", "ERRONEOUS", "OBSOLETE", "OTHER"] }
+      }
+    },
+    "workOrder": {
+      "type": "object",
+      "required": ["id", "sourceReference", "type", "priority", "status", "description", "asset", "location", "tasks", "materials"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/workOrderId" },
+        "sourceReference": { "type": "string", "minLength": 1 },
+        "type": { "enum": ["CORRECTIVE", "PREVENTIVE", "INSPECTION"] },
+        "priority": { "enum": ["HIGH", "NORMAL", "LOW"] },
+        "status": { "enum": ["REQUESTED", "PLANNED", "ASSIGNED", "IN_PROGRESS", "COMPLETED"] },
+        "description": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "asset": {
+          "type": "object",
+          "required": ["id", "functionalLocation"],
+          "additionalProperties": false,
+          "properties": {
+            "id": { "type": "string", "pattern": "^A-[0-9]+$" },
+            "functionalLocation": { "type": "string", "minLength": 1, "maxLength": 40 },
+            "kind": { "enum": ["SWITCH", "SIGNAL", "LEVEL_CROSSING", "CABLE", "PLATFORM"] }
+          }
+        },
+        "location": {
+          "type": "object",
+          "required": ["place"],
+          "additionalProperties": false,
+          "properties": {
+            "place": { "type": "string", "minLength": 1 },
+            "site": { "type": "string" },
+            "lat": { "type": "number", "minimum": -90, "maximum": 90 },
+            "lon": { "type": "number", "minimum": -180, "maximum": 180 }
+          },
+          "dependentRequired": { "lat": ["lon"], "lon": ["lat"] }
+        },
+        "assignee": {
+          "type": "object",
+          "required": ["id", "name"],
+          "additionalProperties": false,
+          "properties": {
+            "id": { "type": "string", "pattern": "^M-[0-9]+$" },
+            "name": { "type": "string", "minLength": 1 },
+            "team": { "type": "string" }
+          }
+        },
+        "schedule": {
+          "type": "object",
+          "required": ["plannedStart", "plannedEnd"],
+          "additionalProperties": false,
+          "properties": {
+            "plannedStart": { "$ref": "#/$defs/utc" },
+            "plannedEnd": { "$ref": "#/$defs/utc" }
+          }
+        },
+        "tasks": {
+          "type": "array",
+          "maxItems": 50,
+          "items": {
+            "type": "object",
+            "required": ["id", "description", "done"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "string", "pattern": "^T-[0-9]+$" },
+              "description": { "type": "string", "minLength": 1 },
+              "done": { "type": "boolean" }
+            }
+          }
+        },
+        "materials": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "type": "object",
+            "required": ["itemNumber", "description", "quantity", "unit"],
+            "additionalProperties": false,
+            "properties": {
+              "itemNumber": { "type": "string", "minLength": 1 },
+              "description": { "type": "string", "minLength": 1 },
+              "quantity": { "type": "number", "exclusiveMinimum": 0 },
+              "unit": { "enum": ["PCS", "M", "KG"] }
+            }
+          }
+        }
+      },
+      "if": {
+        "type": "object", "required": ["status"],
+        "properties": { "status": { "enum": ["ASSIGNED", "IN_PROGRESS", "COMPLETED"] } }
+      },
+      "then": { "required": ["assignee"], "properties": { "assignee": true } }
+    }
+  }
+}

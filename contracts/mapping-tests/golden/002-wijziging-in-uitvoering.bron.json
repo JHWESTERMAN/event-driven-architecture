@@ -1,0 +1,28 @@
+{
+  "kop": {
+    "berichtId": "0c1f6a52-8d3e-4f0b-b1d7-3a9e5c2d7e41",
+    "verzondenOp": "17-10-2026 11:20:30",
+    "bronSysteem": "OMS",
+    "berichtSoort": "WIJZIGING",
+    "volgnummer": 2
+  },
+  "opdracht": {
+    "opdrachtNr": "WOP-001001",
+    "soortCode": "COR",
+    "prioriteitCode": 1,
+    "statusCode": "04",
+    "omschrijving": { "kort": "Storing wissel 214, wisselmotor reageert niet" },
+    "object": { "objectNr": "OBJ-00214", "functioneleLocatie": "BD-N-WSL-0214", "objectType": "WSL" },
+    "locatie": { "plaats": "Breda", "emplacement": "Breda Noord", "positie": { "wgs84": { "breedte": 51.567093, "lengte": 4.776389 } } },
+    "toewijzing": { "medewerkerNr": "000017", "naam": { "voornaam": "J.", "tussenvoegsel": "de", "achternaam": "Vries" }, "ploeg": "Ploeg Breda 2" },
+    "planning": { "geplandStart": "17-10-2026 11:00:00", "geplandEinde": "17-10-2026 14:00:00" },
+    "werkpakket": [
+      { "stapNr": 10, "omschrijving": "Wissel veiligstellen", "gereed": "J" },
+      { "stapNr": 20, "omschrijving": "Wisselmotor controleren", "gereed": "N" },
+      { "stapNr": 30, "omschrijving": "Rapport invullen", "gereed": "N" }
+    ],
+    "materialen": [
+      { "artikelCode": "WM-204", "omschrijving": "Wisselmotor 220V", "hoeveelheid": { "waarde": 1, "eenheid": "ST" } }
+    ]
+  }
+}

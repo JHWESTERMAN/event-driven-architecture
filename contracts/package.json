@@ -1,0 +1,13 @@
+{
+  "name": "eam-contracts",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Schema's, voorbeelden en golden files voor de EAM-integratie (bron, canoniek, monteur)",
+  "scripts": {
+    "test": "node test-contracts.js"
+  },
+  "devDependencies": {
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1"
+  }
+}

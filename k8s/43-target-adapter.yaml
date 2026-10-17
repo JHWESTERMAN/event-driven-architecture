@@ -1,0 +1,95 @@
+# target-adapter: zie target-adapter/README.md. Praat met Artemis over AMQP 1.0; het schema zit in de image.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: target-adapter
+  namespace: werkorder
+  labels:
+    app: target-adapter
+    app.kubernetes.io/part-of: werkorder-eda
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: target-adapter
+  template:
+    metadata:
+      labels:
+        app: target-adapter
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: target-adapter
+          image: REGISTRY/target-adapter:IMAGE_TAG
+          ports:
+            - name: http
+              containerPort: 8091
+          env:
+            - name: PORT
+              value: "8091"
+            - name: BROKER_HOST
+              value: artemis
+            - name: BROKER_PORT
+              value: "61616"
+            - name: BROKER_QUEUE
+              value: eam.workorder.v1
+            - name: BROKER_USER
+              valueFrom:
+                secretKeyRef: { name: artemis-adapter-credentials, key: target-user }
+            - name: BROKER_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: artemis-adapter-credentials, key: target-password }
+            - name: BROKER_DLQ
+              value: eam.workorder.v1.dlq
+            - name: API_URL
+              value: http://werkorder-api:8081
+            - name: OIDC_TOKEN_URL           # inloggen als service-account (client credentials)
+              value: http://keycloak:8080/realms/werkorders/protocol/openid-connect/token
+            - name: OIDC_CLIENT_ID
+              value: target-adapter
+            - name: OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef: { name: target-adapter-oidc, key: secret }
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8091
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8091
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 6          # een tijdelijke brokeruitval mag de pod niet meteen herstarten
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: target-adapter
+  namespace: werkorder
+  labels:
+    app: target-adapter
+    app.kubernetes.io/part-of: werkorder-eda
+spec:
+  selector:
+    app: target-adapter
+  ports:
+    - name: http
+      port: 8091
+      targetPort: 8091

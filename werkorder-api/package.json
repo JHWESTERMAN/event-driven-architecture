@@ -1,9 +1,16 @@
 {
   "name": "werkorder-api",
   "version": "1.0.0",
-  "description": "Synchrone REST-API om de volledige werkorder op te halen",
+  "description": "Werkorder-API: lezen voor de monteursapp, interne schrijf-API voor de target-adapter, outbox naar Kafka",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "kafkajs": "^2.2.4"
+  },
+  "engines": {
+    "node": ">=22.13"
   }
 }

@@ -1,0 +1,70 @@
+# Bronapp (OMS-simulator) voor de demo. Niet van buiten bereikbaar: gebruik
+#   kubectl -n werkorder port-forward svc/bron-app 8095:8095
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bron-app
+  namespace: werkorder
+  labels:
+    app: bron-app
+    app.kubernetes.io/part-of: werkorder-eda
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bron-app
+  template:
+    metadata:
+      labels:
+        app: bron-app
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: bron-app
+          image: REGISTRY/bron-app:IMAGE_TAG
+          ports:
+            - name: http
+              containerPort: 8095
+          env:
+            - name: PORT
+              value: "8095"
+            - name: ADAPTER_URL
+              value: http://source-adapter:8090/werkopdracht
+            - name: AUTO_INTERVAL_MS
+              value: "0"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 96Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8095
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bron-app
+  namespace: werkorder
+  labels:
+    app: bron-app
+    app.kubernetes.io/part-of: werkorder-eda
+spec:
+  selector:
+    app: bron-app
+  ports:
+    - name: http
+      port: 8095
+      targetPort: 8095

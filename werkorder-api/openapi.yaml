@@ -29,6 +29,10 @@ tags:
     description: Werkorders ophalen
   - name: Beheer
     description: Gezondheidscontrole
+  - name: Intern
+    description: |
+      Schrijf-API voor de target-adapter. Niet bedoeld voor de monteursapp en niet bereikbaar via de gateway
+      (die stuurt alleen `/ws` en `/api/` door).
 
 paths:
   /api/werkorders:
@@ -116,6 +120,82 @@ paths:
         '503':
           $ref: '#/components/responses/TijdelijkNietBeschikbaar'
 
+  /intern/werkorders/{werkorderId}:
+    put:
+      tags: [Intern]
+      operationId: werkorderOpslaan
+      summary: Werkorder aanmaken, bijwerken of intrekken (alleen target-adapter)
+      description: |
+        Idempotent op `versie`: een bericht met een versie die niet hoger is dan de opgeslagen versie
+        wordt genegeerd (`GENEGEERD`) en geeft toch `200`, zodat de adapter het bericht kan bevestigen.
+        Een intrekking voor een nog onbekende werkorder wordt bewaard als tombstone (`TOMBSTONE_BEWAARD`);
+        een latere, lagere versie wordt daarna genegeerd.
+
+        Bij een wijziging schrijft de API in dezelfde database-transactie de bijbehorende events in de
+        outbox (topics `werkorder-events` en `werkorder-notificaties`). Een versie-ophoging zonder
+        inhoudelijke wijziging maakt geen events.
+
+        Beveiliging: Bearer-token van het Keycloak-service-account `target-adapter` (client credentials). Het token moet
+        voor `werkorders-api` bedoeld zijn, uitgegeven zijn aan die client (`azp`) en de realmrol `werkorder-schrijver`
+        hebben. Een monteurtoken geeft dus `401`, en een service-token mag de monteur-API niet lezen.
+        Alleen voor lokaal testen zonder Keycloak bestaat nog de gedeelde sleutel in `X-Api-Key`, als `INTERN_API_KEY` is gezet.
+      security:
+        - serviceAccount: []
+        - internApiKey: []
+      parameters:
+        - name: werkorderId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^WO-[0-9]+$'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InternOpslaan'
+      responses:
+        '200':
+          description: Verwerkt, genegeerd (oude versie) of als tombstone bewaard.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternResultaat'
+        '400':
+          $ref: '#/components/responses/OngeldigVerzoek'
+        '401':
+          description: Ontbrekend, ongeldig of verlopen token (of een token van een andere client).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Probleem'
+        '403':
+          description: Het token is geldig en van de juiste client, maar de rol `werkorder-schrijver` ontbreekt.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Probleem'
+        '413':
+          description: Body groter dan 256 KiB.
+        '415':
+          description: Content-Type is niet application/json.
+        '422':
+          description: De werkorder voldoet niet aan het contract. Permanente fout, opnieuw proberen helpt niet.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: integer }
+                  title: { type: string }
+                  detail: { type: string }
+                  fouten:
+                    type: array
+                    items: { type: string }
+        '503':
+          description: De sleutels van de identity provider zijn tijdelijk niet op te halen; opnieuw proberen.
+
   /health:
     get:
       tags: [Beheer]
@@ -138,6 +218,18 @@ paths:
 
 components:
   securitySchemes:
+    serviceAccount:
+      type: oauth2
+      description: Service-account van de target-adapter (Keycloak, realm werkorders, client `target-adapter`).
+      flows:
+        clientCredentials:
+          tokenUrl: http://localhost:8180/realms/werkorders/protocol/openid-connect/token
+          scopes: {}
+    internApiKey:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+      description: Alleen voor lokaal testen zonder Keycloak, en alleen als INTERN_API_KEY is gezet.
     bearerAuth:
       type: http
       scheme: bearer
@@ -236,7 +328,7 @@ components:
 
     Locatie:
       type: object
-      required: [plaats, spoorEmplacement, coordinaten]
+      required: [plaats, spoorEmplacement]
       properties:
         plaats:
           type: string
@@ -287,7 +379,6 @@ components:
         - prioriteit
         - omschrijving
         - locatie
-        - monteur
         - aangemaaktOp
         - taken
         - materiaal
@@ -305,8 +396,24 @@ components:
         locatie:
           $ref: '#/components/schemas/Locatie'
         monteur:
-          $ref: '#/components/schemas/Monteur'
+          allOf:
+            - $ref: '#/components/schemas/Monteur'
+          nullable: true
+          description: Ontbreekt of is null zolang de werkorder niet is toegewezen (alleen bij status OPEN). Via GET /api alleen zichtbaar voor de eigen monteur.
         aangemaaktOp:
+          type: string
+          format: date-time
+        versie:
+          type: integer
+          minimum: 1
+          description: Versie uit de bron; wordt alleen hoger.
+        ingetrokken:
+          type: boolean
+          description: "true als de bron de werkorder heeft ingetrokken. De status is dan AFGEROND (het monteur-model kent geen CANCELLED)."
+        redenIntrekking:
+          type: string
+          nullable: true
+        bijgewerktOp:
           type: string
           format: date-time
         taken:
@@ -332,6 +439,44 @@ components:
         prioriteit:
           $ref: '#/components/schemas/Prioriteit'
         omschrijving:
+          type: string
+        ingetrokken:
+          type: boolean
+
+    InternOpslaan:
+      type: object
+      additionalProperties: false
+      required: [messageId, versie]
+      properties:
+        messageId:
+          type: string
+          description: messageId van het canonieke bericht (voor traceerbaarheid).
+        correlationId:
+          type: string
+        versie:
+          type: integer
+          minimum: 1
+        ingetrokken:
+          type: boolean
+          default: false
+        reden:
+          type: string
+          description: Alleen bij een intrekking (DUPLICATE, ERRONEOUS, OBSOLETE, OTHER).
+        werkorder:
+          description: Verplicht bij aanmaken/wijzigen, verboden bij een intrekking. `werkorderId` moet gelijk zijn aan het pad.
+          allOf:
+            - $ref: '#/components/schemas/Werkorder'
+
+    InternResultaat:
+      type: object
+      required: [resultaat, versie]
+      properties:
+        resultaat:
+          type: string
+          enum: [VERWERKT, GENEGEERD, TOMBSTONE_BEWAARD]
+        versie:
+          type: integer
+        reden:
           type: string
 
     WerkorderLijst:

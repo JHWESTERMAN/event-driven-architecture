@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:eam-poc:monteur:werkorder-notificatie:1.0",
+  "title": "Dun notificatie-event op topic werkorder-notificaties",
+  "description": "Het bestaande contract van de ws-microservice, nu als JSON Schema. Extra velden worden door de ws-microservice genegeerd en niet doorgestuurd.",
+  "type": "object",
+  "required": ["werkorderId", "monteurId", "status", "bericht"],
+  "properties": {
+    "werkorderId": { "type": "string", "pattern": "\\S" },
+    "monteurId": { "type": "string", "pattern": "^M-[0-9]+$" },
+    "status": { "enum": ["OPEN", "IN_BEHANDELING", "AFGEROND"] },
+    "bericht": { "type": "string", "pattern": "\\S" }
+  }
+}

@@ -49,6 +49,11 @@ spec:
                   key: password
             - name: KC_HOSTNAME
               value: http://localhost:8180
+            - name: TARGET_ADAPTER_CLIENT_SECRET   # komt via ${...} in het realm-bestand (client target-adapter)
+              valueFrom:
+                secretKeyRef:
+                  name: target-adapter-oidc
+                  key: secret
             - name: JAVA_OPTS_KC_HEAP
               value: "-Xms64m -Xmx512m"
           resources:

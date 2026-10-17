@@ -1,0 +1,5 @@
+*
+!target-adapter/package.json
+!target-adapter/package-lock.json
+!target-adapter/src
+!contracts/canoniek/eam-workorder-1.0.schema.json

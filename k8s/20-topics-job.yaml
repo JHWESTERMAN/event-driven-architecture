@@ -26,7 +26,7 @@ spec:
               until rpk cluster info -X brokers=$BROKER >/dev/null 2>&1; do
                 echo "Wachten op Redpanda..."; sleep 3
               done
-              for t in werkorder-notificaties werkorder-notificaties.dlq; do
+              for t in werkorder-notificaties werkorder-notificaties.dlq werkorder-events; do
                 rpk topic describe $t -X brokers=$BROKER >/dev/null 2>&1 \
                   || rpk topic create $t -p 3 -r 1 -X brokers=$BROKER
               done

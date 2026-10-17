@@ -1,0 +1,16 @@
+{
+  "name": "target-adapter",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Connector-out: leest canonieke EAM-berichten van de ActiveMQ-queue, valideert, transformeert naar het monteur-model en schrijft ze naar de werkorder-api",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
+    "rhea": "^3.0.5"
+  }
+}
